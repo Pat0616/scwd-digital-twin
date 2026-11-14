@@ -10,7 +10,8 @@
                     "typecheck":  "tsc --noEmit",
                     "test":  "vitest run",
                     "test:watch":  "vitest",
-                    "import-gis":  "tsx scripts/import-gis.ts"
+                    "import-gis":  "tsx scripts/import-gis.ts",
+                    "import-background":  "tsx scripts/import-background.ts"
                 },
     "dependencies":  {
                          "@azure/digital-twins-core":  "2.0.0",

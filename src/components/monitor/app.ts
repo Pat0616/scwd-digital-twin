@@ -7,14 +7,18 @@ import type { GeoJSONSource, Map as MlMap, Marker } from "maplibre-gl";
 import type {
   BgyAreaProps, Facility, GisData, MeterProps, MonState, PipeFeature,
 } from "@/lib/gis/types";
+import { GROUPS, slotOf } from "@/lib/monitor/status";
+import type { TwinDetail } from "@/lib/status/detail";
 import type { LiveResponse } from "@/lib/status/types";
 import { gaugeSvg } from "./gauge";
 
 type Gauge = MeterProps & { lon: number; lat: number };
 type Bgy = BgyAreaProps;
 type Row = { st: MonState; kind: string; name: string; text: string | null; affects?: string | null; action?: string | null; when: string; open: () => void };
+/** A station's detail tabs: the plain summary, every part of its equipment, every live reading. */
+type StationTab = "overview" | "equipment" | "readings";
 type Current =
-  | { kind: "station"; uid: string; all: boolean }
+  | { kind: "station"; uid: string; tab: StationTab }
   | { kind: "gauge"; uid: string }
   | { kind: "pipe"; uid: string }
   | { kind: "focus"; id: string }
@@ -33,6 +37,34 @@ function age(t: string | null | undefined): string {
   if (h < 48) return `${Math.round(h)} h ago`;
   return `${Math.round(h / 24)} days ago`;
 }
+const timeOfDay = (t: string | null | undefined) => (t ? new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
+
+// ---- equipment specifications: a twin property as people read it ("rated_discharge_lps": "Rated discharge" "8 L/s")
+const MODEL_NAMES: Record<string, string> = {
+  WaterSource: "Water source (well)", SubmersiblePump: "Submersible pump", VFD: "Pump drive (VFD)", DischargePipe: "Discharge pipe",
+  Chlorinator: "Chlorinator", ChlorinatorPump: "Chlorine dosing pump", ChlorineTank: "Chlorine tank", InletValve: "Inlet valve",
+  StorageTank: "Storage tank", OutletValve: "Outlet valve", OutletPipe: "Outlet pipe", GridConnection: "Grid connection",
+  Generator: "Generator", TransferSwitch: "Power transfer switch", TelemetryUnit: "Telemetry unit", BulkSupplyPoint: "Bulk supply point",
+  PumpingStation: "Pumping station", DPP: "Designated Pressure Point", FarPointSite: "Far-point chlorine site",
+};
+const UNIT_SUFFIX: [RegExp, string][] = [
+  [/_lps$/, "L/s"], [/_lph$/, "L/h"], [/_m3_per_day$/, "m³/day"], [/_m3$/, "m³"], [/_hp$/, "hp"], [/_kw$/, "kW"], [/_kva$/, "kVA"],
+  [/_pct$/, "%"], [/_psi$/, "psi"], [/_mm$/, "mm"], [/_m$/, "m"], [/_v$/, "V"], [/_a$/, "A"], [/_hz$/, "Hz"], [/_l$/, "L"],
+  [/_hours?$/, "h"], [/_ppm$/, "ppm"], [/_kg$/, "kg"],
+];
+const SPEC_HIDE = new Set(["spec_source", "latitude", "longitude", "station_status"]);
+function specLabel(key: string): string {
+  let k = key;
+  for (const [re] of UNIT_SUFFIX) k = k.replace(re, "");
+  const s = k.replace(/_/g, " ").replace(/\bno\b/, "no.").replace(/\bpct\b/, "%").trim();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+function specValue(key: string, v: string | number | boolean): string {
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  const unit = UNIT_SUFFIX.find(([re]) => re.test(key))?.[1];
+  const text = typeof v === "number" ? v.toLocaleString() : v.replace(/_/g, " ");
+  return unit ? (unit === "%" ? `${text}%` : `${text} ${unit}`) : text;
+}
 const affectsText = (a: string | null | undefined, most = 3) => {
   const l = (a || "").split(", ").filter(Boolean);
   return l.slice(0, most).join(", ") + (l.length > most ? ` +${l.length - most} more` : "");
@@ -48,11 +80,20 @@ function bbox(g: { coordinates: unknown }): [[number, number], [number, number]]
 }
 
 type Extent = [[number, number], [number, number]];
-/** Sorsogon's outline (public/gis/province.json, from data/sorsogon_admin.gpkg's "province" layer). */
-export type ProvinceData = GeoJSON.FeatureCollection<GeoJSON.Polygon | GeoJSON.MultiPolygon>;
+/** An area layer of the QGIS project (public/gis/*.json, from npm run import-background). */
+export type AreaData = GeoJSON.FeatureCollection<GeoJSON.Polygon | GeoJSON.MultiPolygon>;
+/** The QGIS project's background layers (no online basemap). */
+export interface Background {
+  mask: AreaData;
+  municipalities: AreaData;
+  municipalityLabels: GeoJSON.FeatureCollection<GeoJSON.Point>;
+  barangays: AreaData;
+  barangayLabels: GeoJSON.FeatureCollection<GeoJSON.Point>;
+  streets: GeoJSON.FeatureCollection<GeoJSON.LineString | GeoJSON.MultiLineString>;
+}
 const PROVINCE_PAD = 0.02;  // degrees (about 2 km) the map may show past the province's edge
 
-function bboxOfAll(fc: ProvinceData): Extent {
+function bboxOfAll(fc: AreaData): Extent {
   const boxes = fc.features.map((f) => bbox(f.geometry));
   return [[Math.min(...boxes.map((b) => b[0][0])), Math.min(...boxes.map((b) => b[0][1]))],
     [Math.max(...boxes.map((b) => b[1][0])), Math.max(...boxes.map((b) => b[1][1]))]];
@@ -69,23 +110,31 @@ function lockedBounds([[x0, y0], [x1, y1]]: Extent, el: HTMLElement): Extent {
   return [[cx - w / k / 2, cy - h / 2], [cx + w / k / 2, cy + h / 2]];
 }
 
-/** A box around the province with every part of it (its islands too) cut out as a hole. */
-function outsideMask(fc: ProvinceData): GeoJSON.Feature<GeoJSON.Polygon> {
+/** A box around the area with every part of it (its islands too) cut out as a hole: QGIS's inverted polygon fill. */
+function outsideMask(fc: AreaData): GeoJSON.FeatureCollection<GeoJSON.Polygon | GeoJSON.MultiPolygon> {
   const [[x0, y0], [x1, y1]] = bboxOfAll(fc), m = 5;
   const outer: GeoJSON.Position[] = [[x0 - m, y0 - m], [x1 + m, y0 - m], [x1 + m, y1 + m], [x0 - m, y1 + m], [x0 - m, y0 - m]];
   const parts = fc.features.flatMap((f) => (f.geometry.type === "Polygon" ? [f.geometry.coordinates] : f.geometry.coordinates));
   const clockwise = (r: GeoJSON.Position[]) => r.reduce((a, p, i) => { const q = r[(i + 1) % r.length]!; return a + (q[0]! - p[0]!) * (q[1]! + p[1]!); }, 0) > 0;
   const holes = parts.map((poly) => poly[0]!).map((r) => (clockwise(r) ? r : [...r].reverse()));
-  return { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [outer, ...holes] } };
+  // the area's own holes (e.g. Sorsogon Bay inside the province's extent) are outside it too: filled as well
+  const inner = parts.flatMap((poly) => poly.slice(1)).map((r) => [clockwise(r) ? [...r].reverse() : r]);
+  return { type: "FeatureCollection", features: [
+    { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [outer, ...holes] } },
+    ...(inner.length ? [{ type: "Feature" as const, properties: {}, geometry: { type: "MultiPolygon" as const, coordinates: inner } }] : []),
+  ] };
 }
 
-export function startMonitor(root: HTMLElement, gis: GisData, province: ProvinceData | null): () => void {
+export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | null, onReady?: () => void): () => void {
   const $ = <T extends HTMLElement = HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
   const MON = gis.meta.monitor, COL = MON.colours as Record<string, string>, LBL = MON.labels as Record<string, string>;
   const RANK: Record<string, number> = Object.fromEntries(MON.rank.map((s, i) => [s, i]));
   const P = MON.palette;
   const badge = (st: string | null | undefined, cls = "b") => `<span class="badge ${cls}">${(MON.badges as Record<string, string>)[st ?? ""] || MON.badges.nodata}</span>`;
-  const textCol = (st: string | null | undefined) => st === "attention" ? "var(--attention-text)" : (COL[st ?? ""] || "var(--text)");
+  const icon = (g: string) => `<span class="chip">${(MON.groupIcons as Record<string, string>)[g] ?? ""}</span>`;
+  // state colours as text: bright on the navy sidebar, the QGIS ones on the light map
+  const textCol = (st: string | null | undefined) => ["ok", "attention", "down", "nodata", "notwin"].includes(st ?? "") ? `var(--${st}-text)` : "var(--text)";
+  const mapCol = (st: string | null | undefined) => st === "attention" ? "#b45309" : (COL[st ?? ""] || "#475569");
   const mapEl = $("#map"), side = $("#side"), detail = $("#detail");
 
   // ---------------------------------------------------------------- data (live fields blanked until the twin answers)
@@ -180,7 +229,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
   }
   function renderAttention() {
     const rows = attentionRows();
-    $("#attTitle").textContent = `NEEDS ATTENTION (${rows.length})`;
+    $("#attTitle").textContent = `Needs attention (${rows.length})`;
     const el = $("#attention");
     el.innerHTML = rows.length ? rows.map((r, i) => {
       const who = [r.affects ? `Affects ${affectsText(r.affects)}` : "", r.when].filter(Boolean).join(" · ");
@@ -194,9 +243,13 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
   }
   function renderCitySummary() {
     const c = count(twinStations());
-    $("#citySummary").innerHTML = `Sorsogon City water · <span style="color:var(--ok)">${c.ok || 0} working</span>` +
-      (c.down ? ` · <span style="color:var(--down)">${c.down} not working</span>` : "") +
-      (c.attention ? ` · <span style="color:var(--attention-text)">${c.attention} need attention</span>` : "");
+    // as the QGIS project's Sorsogon City label in the province view (monitor_style.style_municipalities)
+    const text = `SCWD water: ${c.ok || 0} working` + (c.down ? ` · ${c.down} not working` : "") + (c.attention ? ` · ${c.attention} need attention` : "");
+    const colour = c.down ? COL.down! : c.attention ? "#b45309" : COL.ok!;
+    if (map.getLayer("muni-summary")) {
+      map.setLayoutProperty("muni-summary", "text-field", lastLive ? text : "");
+      map.setPaintProperty("muni-summary", "text-color", colour);
+    }
   }
 
   // ---------------------------------------------------------------- details
@@ -209,14 +262,15 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     detail.innerHTML = back + html;
     side.classList.add("showing");
   }
-  function closeDetail() { side.classList.remove("showing"); current = null; }
+  function closeDetail() { side.classList.remove("showing"); current = null; select(null); }
   function head(title: string, st: string | null | undefined, hl: string | null | undefined, where?: string) {
     return `<div class="head">${badge(st)}<div><h2>${esc(title)}</h2><div class="hl" style="color:${textCol(st)}">${esc(hl || LBL[st ?? ""] || "")}</div>${where ? `<div class="where">${esc(where)}</div>` : ""}</div></div>`;
   }
   function tiles(list: Facility["groups"][number]["all"]) {
+    if (!list.length) return "";
     return `<div class="tiles">` + list.map((s) => {
       const lim = [s.min != null ? `min ${s.min}` : "", s.max != null ? `max ${s.max}` : ""].filter(Boolean).join(" · ");
-      return `<div class="tile ${s.alarm || s.offline ? "alarm" : ""}"><div class="tn" title="${esc(s.name)}">${esc(s.name)}</div><div class="tv">${esc(s.value)}</div>` +
+      return `<div class="tile ${s.alarm || s.offline ? "alarm" : ""}" title="${esc(s.alarm || "")}"><div class="tn" title="${esc(s.name)}">${esc(s.name)}</div><div class="tv">${esc(s.value)}</div>` +
         (s.pct != null ? `<div class="bar"><i style="width:${Math.max(0, Math.min(100, s.pct))}%"></i></div>` : "") +
         `<div class="tm">${esc([lim, s.offline ? "sensor offline" : age(s.time)].filter(Boolean).join(" · "))}</div></div>`;
     }).join("") + `</div>`;
@@ -225,40 +279,158 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     if (!rows || !rows.length) return "";
     return `<div class="note"><b>Field readings</b><table class="fr">` + rows.map((r) => `<tr><td>${esc(r.measure)}</td><td><b>${esc(r.value ?? "—")} ${esc(r.unit || "")}</b></td><td style="color:var(--faint)">${esc(age(r.time))} · ${esc(r.by || "")}</td></tr>`).join("") + `</table></div>`;
   }
-  function openStation(uid: string, fly: boolean, all = false) {
+  function specsHtml(props: Record<string, string | number | boolean>) {
+    const rows = Object.entries(props).filter(([k]) => !SPEC_HIDE.has(k) && k !== "issue");
+    const src = props.spec_source && props.spec_source !== "mock" ? props.spec_source : null;   // "mock": no real source
+    if (!rows.length && !src) return "";
+    return `<dl class="specs">` + rows.map(([k, v]) => `<dt>${esc(specLabel(k))}</dt><dd>${esc(specValue(k, v))}</dd>`).join("") +
+      (src ? `<div class="src">Source: ${esc(src)}</div>` : "") + `</dl>`;
+  }
+
+  // ---- the twin's details (parts, specifications, device info) from /api/twin/[id], re-read on every live status
+  const details = new Map<string, { at: string | null; data: TwinDetail | null; loading: boolean }>();
+  /** The twin's details: the latest copy (possibly from the previous status while a new one loads), undefined
+   * before the first one arrives, null when it could not be read. */
+  function twinDetail(id: string): TwinDetail | null | undefined {
+    const at = lastLive?.fetchedAt ?? null;
+    const d = details.get(id);
+    if ((!d || d.at !== at) && !d?.loading) {
+      details.set(id, { at: d?.at ?? null, data: d?.data ?? null, loading: true });
+      fetch(`/api/twin/${encodeURIComponent(id)}`)
+        .then((r) => (r.ok ? (r.json() as Promise<TwinDetail>) : null))
+        .catch(() => null)
+        .then((data) => {
+          details.set(id, { at, data, loading: false });
+          if ((current?.kind === "station" && current.tab === "equipment") || current?.kind === "gauge") rerenderDetail();
+        });
+      if (!d) return undefined;
+    }
+    return d ? d.data : undefined;
+  }
+
+  // ---- stations: Overview (plain words), Equipment (every part, working or not), Readings (every live reading)
+  const SHORT: Record<string, string> = { source: "Source", treatment: "Treat", pumping: "Pump", vfd: "VFD", storage: "Tank", grid: "Grid", generator: "Gen" };
+  const WORD: Record<string, string> = { ok: "Working", attention: "Check", down: "Not working", nodata: "No data" };
+  const openParts = new Set<string>(), closedParts = new Set<string>();
+  let scrollToGroup: string | null = null;
+
+  function openStation(uid: string, fly: boolean, tab: StationTab = "overview") {
     const f = stations.find((s) => s.uid === uid);
     if (!f) return;
-    current = { kind: "station", uid, all };
+    current = { kind: "station", uid, tab };
+    select(uid);
     if (fly) map.flyTo({ center: [f.lon, f.lat], zoom: 16 });
+    const where = f.barangay ? `${f.barangay}, Sorsogon City` : "";
     if (f.state === "notwin" || !f.twin_id) {
-      showDetail(head(f.name, "notwin", "Not in the digital twin yet", f.barangay ? `${f.barangay}, Sorsogon City` : "") +
-        `<div class="note">This station is on the SCWD official map but not in the digital twin yet, so there are no live readings. Add it to Azure Digital Twins to monitor it here.</div>`);
+      showDetail(head(f.name, "notwin", "Not in the digital twin yet", where) +
+        `<div class="note">This station is on the SCWD official map but not in the digital twin yet, so there are no live readings. Add it to Azure Digital Twins to monitor it here.</div>` +
+        (f.notes ? `<div class="note">${esc(f.notes)}</div>` : ""));
       return;
     }
-    let html = head(f.name, f.state, (f.headline || "").split(" (+")[0], f.barangay ? `${f.barangay}, Sorsogon City` : "") + todo(f);
-    if ((f.issues || []).length > 1) html += `<div class="issues"><b>Needs attention</b>${f.issues.map((i) => "• " + esc(i)).join("<br>")}</div>`;
-    for (const g of f.groups) {
-      const word = ({ ok: "Working", attention: "Check", down: "Not working", nodata: "No data" } as Record<string, string>)[g.state] || "";
-      html += `<div class="group ${g.state}"><div class="gh"><span class="badge ic">${MON.groupIcons[g.group]}</span><span class="gt">${esc(g.title)}</span><span class="pill ${g.state}">${word}</span></div>` +
-        (g.issues.length ? `<div class="gi">${g.issues.map(esc).join("; ")}</div>` : "") + tiles(all ? g.all : g.key) + `</div>`;
-    }
-    const total = f.groups.reduce((n, g) => n + g.all.length, 0);
-    if (f.groups.length) html += `<div class="more"><a data-act="${all ? "summary" : "all"}" data-uid="${esc(f.uid)}">${all ? "Show the summary" : `Show all ${total} live readings`}</a></div>`;
-    html += fieldTable(f.fieldReadings) + `<div class="twin">Twin id: ${esc(f.twin_id || "—")}</div>`;
+    let html = head(f.name, f.state, (f.headline || "").split(" (+")[0], where) + todo(f);
+    // the seven equipment groups at a glance
+    const byGroup = new Map(f.groups.map((g) => [g.group, g]));
+    html += `<div class="strip">` + GROUPS.map(([g, title]) => {
+      const cg = byGroup.get(g);
+      return cg ? `<button data-act="group" data-uid="${esc(f.uid)}" data-g="${g}" title="${esc(title)}: ${esc(LBL[cg.state] || "")}">${icon(g)}<i style="background:${COL[cg.state] || COL.nodata}"></i>${SHORT[g]}</button>`
+        : `<button class="none" disabled title="${esc(title)}: none at this site">${icon(g)}${SHORT[g]}</button>`;
+    }).join("") + `</div>`;
+    const nReadings = f.groups.reduce((n, g) => n + g.all.length, 0);
+    const nParts = f.groups.reduce((n, g) => n + g.parts.length, 0);
+    html += `<div class="tabs">` + ([["overview", "Overview", ""], ["equipment", "Equipment", nParts || ""], ["readings", "Readings", nReadings]] as const)
+      .map(([k, t, n]) => `<button class="${tab === k ? "on" : ""}" data-act="tab" data-tab="${k}" data-uid="${esc(f.uid)}">${t}${n !== "" ? `<em>${n}</em>` : ""}</button>`).join("") + `</div>`;
+    if (tab === "overview") {
+      if ((f.issues || []).length > 1) html += `<div class="issues"><b>Needs attention</b>${f.issues.map((i) => "• " + esc(i)).join("<br>")}</div>`;
+      for (const g of f.groups)
+        html += `<div class="group ${g.state}"><div class="gh">${icon(g.group)}<span class="gt">${esc(g.title)}</span><span class="pill ${g.state}">${WORD[g.state] || ""}</span></div>` +
+          (g.issues.length ? `<div class="gi">${g.issues.map(esc).join("; ")}</div>` : "") + tiles(g.key) + `</div>`;
+      html += fieldTable(f.fieldReadings);
+    } else if (tab === "readings") {
+      for (const g of f.groups) if (g.all.length)
+        html += `<div class="group ${g.state}"><div class="gh">${icon(g.group)}<span class="gt">${esc(g.title)}</span><span class="gc">${g.all.length}</span><span class="pill ${g.state}">${WORD[g.state] || ""}</span></div>` +
+          tiles(g.all) + `</div>`;
+      if (!nReadings) html += `<div class="note">This site reports no live readings yet.</div>`;
+    } else html += equipmentHtml(f);
+    html += `<div class="twin">Twin id: ${esc(f.twin_id || "—")}${lastLive ? ` · updated ${esc(timeOfDay(lastLive.fetchedAt))}` : ""}</div>`;
     showDetail(html);
+    if (tab === "equipment" && scrollToGroup) {
+      const el = detail.querySelector(`#grp-${scrollToGroup}`);
+      if (el) { el.scrollIntoView({ block: "start", behavior: "smooth" }); scrollToGroup = null; }
+    }
   }
+
+  function equipmentHtml(f: Facility): string {
+    const d = twinDetail(f.twin_id!);
+    if (d === undefined) return `<div class="loading">Loading the equipment from the digital twin…</div>`;
+    if (d === null) return `<div class="note">The equipment details could not be read from the digital twin. They will load with the next update.</div>`;
+    type Part = TwinDetail["parts"][number];
+    // a bulk supply point has no parts: the site itself is its one piece of equipment
+    const parts: Part[] = d.parts.length ? d.parts
+      : [{ id: d.id, model: d.model, name: d.name, role: null, props: d.props, status: f.status === "offline" ? "offline" : "operational", alarm: null }];
+    let html = `<div class="tools"><a data-act="expand" data-uid="${esc(f.uid)}">Expand all</a><a data-act="collapse" data-uid="${esc(f.uid)}">Collapse all</a></div>`;
+    if (d.parts.length) {
+      const sp = specsHtml(d.props);
+      html += `<div class="group"><div class="gh"><span class="chip">${MON.sites[f.kind || "station"] ?? ""}</span><span class="gt">${esc(MODEL_NAMES[d.model] || d.model)}</span>` +
+        `<span class="pill ${f.status === "offline" ? "down" : "ok"}">${f.status === "offline" ? "Down" : f.standby ? "Standby" : "Operating"}</span></div>` +
+        (typeof d.props.issue === "string" ? `<div class="gi" style="color:var(--down-text)">${esc(d.props.issue)}</div>` : "") +
+        (sp || `<div class="muted" style="margin-top:6px">No station specifications in the twin.</div>`) + `</div>`;
+    }
+    const groupState = new Map(f.groups.map((g) => [g.group as string, g.state]));
+    const sections: [string, string][] = [...GROUPS, ["other", "Other equipment"]];
+    for (const [g, title] of sections) {
+      const list = parts.filter((p) => (slotOf(p.model) ?? "other") === g);
+      if (!list.length) continue;
+      const st = groupState.get(g) ?? "ok";
+      html += `<div class="group ${st}" id="grp-${g}"><div class="gh">${g === "other" ? `<span class="chip"></span>` : icon(g)}<span class="gt">${esc(title)}</span>` +
+        `<span class="gc">${list.length} part${list.length > 1 ? "s" : ""}</span><span class="pill ${st}">${WORD[st] || ""}</span></div>`;
+      for (const p of list) {
+        const rs = d.readings.filter((r) => r.twin_id === p.id);
+        const state = p.status === "offline" ? "down" : p.alarm ? "attention" : "ok";
+        const open = openParts.has(p.id) || (state !== "ok" && !closedParts.has(p.id));
+        const first = rs[0];
+        const kv = first ? `${first.value}`.replace(/ lps$/, " L/s").replace(/ %$/, "%") : "";
+        const sub = [MODEL_NAMES[p.model] || p.model, rs.length ? `${rs.length} reading${rs.length > 1 ? "s" : ""}` : "no live readings"].join(" · ");
+        const tileList = rs.map((r) => ({
+          name: r.name, value: r.value.replace(/ lps$/, " L/s").replace(/ %$/, "%"), alarm: r.alarm, offline: !r.online, time: r.time,
+          unit: r.unit, pct: r.unit === "%" ? r.number : null, min: r.min, max: r.max, twin_id: r.twin_id, property: r.property,
+        }));
+        const sp = specsHtml(p.props);
+        html += `<details class="part" data-id="${esc(p.id)}"${open ? " open" : ""}><summary>` +
+          `<span class="dot" style="background:${textCol(state)};color:${textCol(state)}"></span>` +
+          `<span class="pn"><b>${esc(p.name || MODEL_NAMES[p.model] || p.model)}</b><small>${esc(sub)}</small></span>` +
+          (kv ? `<span class="kv" style="${state !== "ok" && first?.alarm ? "color:var(--down-text)" : ""}">${esc(kv)}</span>` : `<span class="pill ${state}">${state === "ok" ? "Working" : state === "down" ? "Not working" : "Check"}</span>`) +
+          `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m9 6 6 6-6 6"/></svg></summary>` +
+          `<div class="body">` + (p.alarm ? `<div class="alarmtxt">${esc(p.alarm)}</div>` : "") +
+          (p.status === "offline" ? `<div class="alarmtxt">Not operational</div>` : "") +
+          tiles(tileList) + (sp || `<div class="muted" style="margin-top:8px">No specifications in the twin.</div>`) +
+          `<div class="twin" style="margin-top:8px">${esc(p.id)}</div></div></details>`;
+      }
+      html += `</div>`;
+    }
+    return html;
+  }
+
   function openGauge(uid: string, fly: boolean) {
     const g = gauges.find((x) => x.uid === uid);
     if (!g) return;
     current = { kind: "gauge", uid };
+    select(uid);
     if (fly) map.flyTo({ center: [g.lon, g.lat], zoom: 16 });
     const what = g.type === "pressure_logger" ? "Designated Pressure Point (DPP)" : "Far-point chlorine check";
     const range = g.type === "pressure_logger" ? "Safe range: at least <b>7 psi</b> (SCWD minimum). Below 3 psi means little or no water at the tap."
       : "Safe range: <b>0.3 – 1.5 ppm</b> free chlorine at the end of the line.";
     const value = g.type === "pressure_logger" ? (g.psi != null ? `${g.psi} psi` : "—") : (g.chlorine != null ? `${g.chlorine} ppm` : "—");
-    showDetail(head(g.name, g.state || "nodata", g.headline, what) + todo(g) +
-      `<div class="note">${range}<br>Reading: <b>${esc(value)}</b> · ${esc(age(g.time) || "no reading")}${g.status === "offline" ? " · sensor offline" : ""}</div>` +
-      fieldTable(g.fieldReadings) + `<div class="twin">Twin id: ${esc(g.twin_id || "—")}</div>`);
+    const pic = g.type === "pressure_logger" ? `<span class="badge" style="width:64px;height:64px;flex:none">${gaugeSvg(g.psi, g.state && g.state !== "notwin" ? g.state : "nodata", COL)}</span>` : "";
+    let html = head(g.name, g.state || "nodata", g.headline, what) + todo(g) +
+      `<div class="note" style="display:flex;gap:14px;align-items:center">${pic}<div>Reading: <b style="font-size:15px">${esc(value)}</b><br>` +
+      `${esc(age(g.time) || "no reading")}${g.status === "offline" ? " · sensor offline" : ""}<br>${range}</div></div>`;
+    if (g.twin_id) {
+      const d = twinDetail(g.twin_id);
+      html += `<div class="sec">Device</div>` + (d === undefined ? `<div class="loading">Loading the device from the digital twin…</div>`
+        : d ? `<div class="group">${specsHtml(d.props) || `<div class="muted">No device details in the twin.</div>`}</div>` : "");
+    }
+    html += fieldTable(g.fieldReadings) + `<div class="twin">Twin id: ${esc(g.twin_id || "—")}</div>`;
+    showDetail(html);
   }
   function openPipe(uid: string) {
     const p = pipes.features.find((x) => x.properties.uid === uid);
@@ -334,8 +506,8 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     html += `<div class="sec">PUMPING STATIONS</div><div class="list">` + (st.length ? st.map((s) => {
       const twin = !!s.state && s.state !== "notwin";
       const pic = MON.sites[twin || s.kind !== "station" ? s.kind || "station" : "station-muted"] ?? "";
-      const parts = (s.problems || []).length ? `<div class="parts">` + s.problems.map((q) => `<span>${MON.groupIcons[q.group]}<b>${MON.badges[q.state] || MON.badges.attention}</b></span>`).join("") + `</div>` : "";
-      return row(`s:${s.uid}`, pic, s.name, twin ? s.headline : "Not in the digital twin yet", s.state || "nodata", parts, "site");
+      const parts = (s.problems || []).length ? `<div class="parts">` + s.problems.map((q) => `<span class="chip">${MON.groupIcons[q.group]}<b>${MON.badges[q.state] || MON.badges.attention}</b></span>`).join("") + `</div>` : "";
+      return row(`s:${s.uid}`, pic, s.name, twin ? s.headline : "Not in the digital twin yet", s.state || "nodata", parts, "site chip");
     }).join("") : `<div class="frow"><div class="h">No pumping station in this barangay; it is supplied through the network.</div></div>`) + `</div>`;
     html += `<div class="note">Lowest pressure now: <b>${b.psi != null ? num(b.psi, 1) + " psi" : "—"}</b><br>` +
       `Latest reading: <b>${esc(age(b.time) || "—")}</b><br>Pipes: <b>${num(b.km, 1)} km</b></div>` +
@@ -346,7 +518,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     const c = current;
     if (!c || !side.classList.contains("showing")) return;
     const scroll = side.querySelector(".scroll")!.scrollTop;
-    if (c.kind === "station") openStation(c.uid, false, c.all);
+    if (c.kind === "station") openStation(c.uid, false, c.tab);
     else if (c.kind === "gauge") openGauge(c.uid, false);
     else if (c.kind === "pipe") { const keep = map.getCenter(); openPipe(c.uid); map.stop(); map.setCenter(keep); }
     else focusBarangay(c.id, false);
@@ -359,17 +531,60 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     if (act === "close") closeDetail();
     else if (act === "backfocus" && focusId) focusBarangay(focusId);
     else if (act === "exitfocus") clearFocus();
-    else if (act === "all" || act === "summary") openStation(t.dataset.uid!, false, act === "all");
+    else if (act === "tab") { side.querySelector(".scroll")!.scrollTop = 0; openStation(t.dataset.uid!, false, t.dataset.tab as StationTab); }
+    else if (act === "group") { scrollToGroup = t.dataset.g!; openStation(t.dataset.uid!, false, "equipment"); }
+    else if (act === "expand" || act === "collapse") {
+      detail.querySelectorAll<HTMLDetailsElement>("details.part").forEach((el) => { el.open = act === "expand"; });
+    }
   };
   detail.addEventListener("click", onDetailClick);
-  const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") clearFocus(); };
+  // remember which parts were opened or closed, so a live update keeps the panel as the user left it
+  const onToggle = (e: Event) => {
+    const el = e.target as HTMLElement;
+    if (!(el instanceof HTMLDetailsElement) || !el.dataset.id) return;
+    const id = el.dataset.id;
+    if (el.open) { openParts.add(id); closedParts.delete(id); } else { openParts.delete(id); closedParts.add(id); }
+  };
+  detail.addEventListener("toggle", onToggle, true);
+  // "/" jumps to the search; Esc leaves a barangay focus, then closes the details
+  const onKey = (e: KeyboardEvent) => {
+    const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+    if (e.key === "/" && !typing) { e.preventDefault(); searchBox.focus(); }
+    else if (e.key === "Escape") {
+      if (typing) searchBox.blur();
+      else if (focusId) clearFocus();
+      else if (side.classList.contains("showing")) closeDetail();
+    }
+  };
   document.addEventListener("keydown", onKey);
 
+  // the selected station or gauge gets a cyan halo on the map
+  let selUid: string | null = null;
+  function select(uid: string | null) {
+    selUid = uid;
+    for (const { el, f } of stationMarkers) el.classList.toggle("sel", f.uid === uid);
+    for (const m of gaugeMarkers) m.wrap.classList.toggle("sel", m.g.uid === uid);
+  }
+
   // ---------------------------------------------------------------- map
+  // The QGIS project's own picture, layer for layer (monitor_style.py), with no online basemap: from the bottom,
+  // Outside Mask, Sorsogon Municipalities, Province relief, Municipality borders, Sorsogon Barangays, City relief,
+  // Served Area, Streets, then the network. Zoom tiers as the project's scales: the province view below zoom 11
+  // (PROVINCE_SCALE 1:150,000), the city view to 13 (STREET_TIER 1:25,000), the street view from there.
+  const PX_PER_MM = 3.78, PX_PER_PT = 1.333;                 // QGIS sizes (96 dpi) as screen pixels
+  const Z = { city: 11, bgyNames: 11.45, mid: 12, minor: 12.8, street: 13, streetNames: 14.6 };   // 1:100k, 60k, 30k, 6k
+  const SEA = "#c9dceb", LAND = P.land, STREET = "#ffffff", STREET_EDGE = "#dcdfe3", MUNI_LINE = "#b8c2cf";
   // held to Sorsogon (as scwd-frontend): it opens on the city, and can neither pan nor zoom out past the province
-  const extent: Extent = province ? bboxOfAll(province) : [[gis.meta.bounds[0], gis.meta.bounds[1]], [gis.meta.bounds[2], gis.meta.bounds[3]]];
-  const map: MlMap = new maplibregl.Map({ container: mapEl, style: "https://tiles.openfreemap.org/styles/positron",
-    bounds: CITY_BOUNDS, maxBounds: lockedBounds(extent, mapEl), renderWorldCopies: false, attributionControl: { compact: true } });
+  const extent: Extent = bg ? bboxOfAll(bg.municipalities) : [[gis.meta.bounds[0], gis.meta.bounds[1]], [gis.meta.bounds[2], gis.meta.bounds[3]]];
+  const style: maplibregl.StyleSpecification = {
+    version: 8,
+    glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",       // the label fonts only
+    sources: {},
+    // the QGIS canvas: white (it shows as a pale band between the coast and the Outside Mask's edge)
+    layers: [{ id: "canvas", type: "background", paint: { "background-color": "#ffffff" } }],
+  };
+  const map: MlMap = new maplibregl.Map({ container: mapEl, style, bounds: CITY_BOUNDS, maxBounds: lockedBounds(extent, mapEl),
+    renderWorldCopies: false, attributionControl: { compact: true, customAttribution: "Sorsogon Water Monitor (QGIS) · streets © OpenStreetMap contributors" } });
   map.on("resize", () => map.setMaxBounds(lockedBounds(extent, mapEl)));
   // development only: lets a test browser check the map (marker positions, bounds)
   if (process.env.NODE_ENV !== "production") (window as unknown as { __monitorMap?: MlMap }).__monitorMap = map;
@@ -378,52 +593,69 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
   let view = MON.views[0]!;
   const WIDTH = ["match", ["get", "class"], "transmission", 3.2, "dist_main", 2.8, "dist_secondary", 1.4, "service", 1, 1.2];
   const BAND = ["match", ["get", "band"], "very_low", COL.down, "low", COL.attention, "ok", COL.ok, "high", "#7c3aed", "#b8c2cf"];
+  const halo = { "text-halo-color": "rgba(255,255,255,0.92)" };
   let loaded = false;
   map.on("load", () => {
     loaded = true;
-    const firstSymbol = map.getStyle().layers.find((l) => l.type === "symbol")?.id;
-    map.addSource("bgy", { type: "geojson", data: areas });
-    // province view: the atlas relief; city view: the same relief washed light (zoom 11-13)
-    for (const r of MON.relief || []) {
+    const relief = (i: number) => {                        // 0: province relief, 1: city relief (washed light)
+      const r = (MON.relief || [])[i];
+      if (!r) return;
       map.addSource(r.id, { type: "image", url: `/gis/${r.url}`, coordinates: r.corners as [[number, number], [number, number], [number, number], [number, number]] });
       map.addLayer({ id: r.id, type: "raster", source: r.id, ...(r.minzoom != null ? { minzoom: r.minzoom } : {}), ...(r.maxzoom != null ? { maxzoom: r.maxzoom } : {}),
-        paint: { "raster-opacity": 1, "raster-fade-duration": 0 } }, firstSymbol);
+        paint: { "raster-opacity": 1, "raster-fade-duration": 0, "raster-resampling": "linear" } });
+    };
+    if (bg) {
+      // Outside Mask: the sea colour everywhere outside the province's extent, with a thin grey edge
+      map.addSource("mask", { type: "geojson", data: outsideMask(bg.mask) });
+      map.addLayer({ id: "outside-mask", type: "fill", source: "mask", paint: { "fill-color": SEA, "fill-antialias": false } });
+      map.addLayer({ id: "outside-edge", type: "line", source: "mask", paint: { "line-color": "#b8c2cf", "line-width": 0.4 * PX_PER_MM } });
+      // Sorsogon Municipalities: the land of the whole province, its edge
+      map.addSource("muni", { type: "geojson", data: bg.municipalities });
+      map.addLayer({ id: "muni-land", type: "fill", source: "muni", paint: { "fill-color": LAND } });
+      map.addLayer({ id: "muni-edge", type: "line", source: "muni", paint: { "line-color": MUNI_LINE, "line-width": 0.5 * PX_PER_MM } });
     }
-    // outside the province: solid sea over the basemap, the relief and the neighbours' names, so Sorsogon stands
-    // alone (as QGIS's Outside Mask), with its border. Added on top of the basemap; the layers below are inserted
-    // under its labels, inside the province.
-    if (province) {
-      map.addSource("outside", { type: "geojson", data: outsideMask(province) });
-      map.addLayer({ id: "outside-mask", type: "fill", source: "outside", paint: { "fill-color": P.sea, "fill-opacity": 1, "fill-antialias": false } });
-      map.addSource("province", { type: "geojson", data: province });
-      map.addLayer({ id: "province-line", type: "line", source: "province", layout: { "line-join": "round" },
-        paint: { "line-color": P.ink, "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1, 13, 2], "line-opacity": 0.45 } });
+    relief(0);                                             // Province relief (province view)
+    if (bg) {
+      // Municipality borders over the province relief (province view)
+      map.addLayer({ id: "muni-borders", type: "line", source: "muni", maxzoom: Z.city, layout: { "line-join": "round" },
+        paint: { "line-color": "#7c8899", "line-width": 0.5 * PX_PER_MM } });
+      // Sorsogon Barangays: land with thin borders from the city view in
+      map.addSource("barangays", { type: "geojson", data: bg.barangays });
+      map.addLayer({ id: "bgy-land", type: "fill", source: "barangays", minzoom: Z.city, paint: { "fill-color": LAND } });
+      map.addLayer({ id: "bgy-land-edge", type: "line", source: "barangays", minzoom: Z.city, paint: { "line-color": P.border, "line-width": 0.45 * PX_PER_MM } });
     }
+    relief(1);                                             // City relief (city view)
+    // Served Area (from Barangay Monitoring): city view one soft tint; street view the barangays in 4 soft colours
+    // with their borders, the served ones with an inner SCWD-blue line
+    map.addSource("bgy", { type: "geojson", data: areas });
     const SERVED = ["!=", ["get", "status"], "not_served"] as maplibregl.FilterSpecification;
-    map.addLayer({ id: "served-city", type: "fill", source: "bgy", minzoom: 11, maxzoom: 13, filter: SERVED,
-      paint: { "fill-color": P.served, "fill-opacity": 0.55 } }, firstSymbol);
-    const PASTEL = ["match", ["coalesce", ["get", "pastel"], 0], 1, P.pastels["1"], 2, P.pastels["2"], 3, P.pastels["3"], 4, P.pastels["4"], P.land];
-    map.addLayer({ id: "served", type: "fill", source: "bgy", minzoom: 13,
-      paint: { "fill-color": PASTEL as never, "fill-opacity": 0.9 } }, firstSymbol);
-    map.addLayer({ id: "served-line", type: "line", source: "bgy", minzoom: 13, filter: SERVED,
-      paint: { "line-color": P.servedLine, "line-width": 2, "line-offset": 1.6, "line-opacity": 0.85 } }, firstSymbol);
+    map.addLayer({ id: "served-city", type: "fill", source: "bgy", minzoom: Z.city, maxzoom: Z.street, filter: SERVED,
+      paint: { "fill-color": P.served, "fill-opacity": 0.55 } });
+    const PASTEL = ["match", ["coalesce", ["get", "pastel"], 0], 1, P.pastels["1"], 2, P.pastels["2"], 3, P.pastels["3"], 4, P.pastels["4"], LAND];
+    map.addLayer({ id: "served", type: "fill", source: "bgy", minzoom: Z.street, paint: { "fill-color": PASTEL as never } });
+    map.addLayer({ id: "bgy-line", type: "line", source: "bgy", minzoom: Z.street, paint: { "line-color": P.border, "line-width": 0.45 * PX_PER_MM } });
+    map.addLayer({ id: "served-line", type: "line", source: "bgy", minzoom: Z.street, filter: SERVED,
+      paint: { "line-color": P.servedLine, "line-width": 0.6 * PX_PER_MM, "line-offset": 0.45 * PX_PER_MM + 1 } });
     map.addLayer({ id: "bgy-state", type: "fill", source: "bgy", filter: ["all", ["has", "state"], ["!=", ["get", "state"], null]] as never, layout: { visibility: "none" },
-      paint: { "fill-color": ["match", ["get", "state"], "ok", P.tints.ok, "attention", P.tints.attention, "down", P.tints.down, P.tints.nodata], "fill-opacity": 0.85 } }, firstSymbol);
-    map.addLayer({ id: "bgy-line", type: "line", source: "bgy", minzoom: 13, paint: { "line-color": P.border, "line-width": 1.4 } }, firstSymbol);
-    map.addLayer({ id: "bgy-name-city", type: "symbol", source: "bgy", minzoom: 11.6, maxzoom: 13,
-      filter: ["==", ["get", "town"], "Sorsogon City"],
-      layout: { "text-field": ["upcase", ["get", "name"]], "text-font": ["Noto Sans Regular"], "text-size": 9.5,
-        "text-letter-spacing": 0.05, "text-max-width": 8, "text-padding": 6 },
-      paint: { "text-color": "#7a8699", "text-halo-color": "#ffffff", "text-halo-width": 1.2 } });
-    map.addLayer({ id: "bgy-name", type: "symbol", source: "bgy", minzoom: 13,
-      filter: ["==", ["get", "town"], "Sorsogon City"],
-      layout: { "text-field": ["upcase", ["get", "name"]], "text-font": ["Noto Sans Bold"], "text-size": 11,
-        "text-letter-spacing": 0.05, "text-max-width": 8, "text-padding": 4 },
-      paint: { "text-color": P.bgyName, "text-halo-color": "#ffffff", "text-halo-width": 1.6 } });
+      paint: { "fill-color": ["match", ["get", "state"], "ok", P.tints.ok, "attention", P.tints.attention, "down", P.tints.down, P.tints.nodata], "fill-opacity": 1, "fill-outline-color": "#ffffff" } });
+    if (bg) {
+      // Streets: white with a light edge; majors from the city view, mid from 1:60,000, minor from 1:30,000
+      map.addSource("streets", { type: "geojson", data: bg.streets });
+      const roads: [string, number, number][] = [["minor", 0.5, Z.minor], ["mid", 0.9, Z.mid], ["major", 1.4, Z.city]];
+      for (const [cls, w, z] of roads)
+        map.addLayer({ id: `street-edge-${cls}`, type: "line", source: "streets", minzoom: z, filter: ["==", ["get", "class"], cls],
+          layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": STREET_EDGE, "line-width": (w + 0.4) * PX_PER_MM } });
+      for (const [cls, w, z] of roads)
+        map.addLayer({ id: `street-${cls}`, type: "line", source: "streets", minzoom: z, filter: ["==", ["get", "class"], cls],
+          layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": STREET, "line-width": w * PX_PER_MM } });
+      map.addLayer({ id: "street-name", type: "symbol", source: "streets", minzoom: Z.streetNames,
+        layout: { "symbol-placement": "line", "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 7 * PX_PER_PT },
+        paint: { "text-color": "#8a94a6", ...halo, "text-halo-width": 1.4 } });
+    }
     map.addSource("focusmask", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     map.addLayer({ id: "focus-veil", type: "fill", source: "focusmask", paint: { "fill-color": "#ffffff", "fill-opacity": 0.7 } });
     map.addLayer({ id: "focus-line", type: "line", source: "bgy", filter: ["==", ["get", "id"], "__none__"],
-      paint: { "line-color": P.ink, "line-width": 3 } });
+      paint: { "line-color": P.ink, "line-width": 1.2 * PX_PER_MM } });
     for (const lid of ["served", "served-city"])
       map.on("click", lid, (e) => { if (e.defaultPrevented) return; const id = e.features?.[0]?.properties.id; if (bgys().some((x) => x.id === id)) focusBarangay(id); });
     const tip = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: "tip", offset: 12 });
@@ -432,15 +664,10 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
         const b = bgys().find((x) => x.id === e.features?.[0]?.properties.id);
         if (!b) { tip.remove(); return; }
         map.getCanvas().style.cursor = "pointer";
-        tip.setLngLat(e.lngLat).setHTML(`<b>${esc(b.name)}</b><br><span style="color:${textCol(b.state)}">${esc(b.headline || LBL[b.state ?? ""] || "")}</span><br><span style="color:var(--faint)">Click to see it on its own</span>`).addTo(map);
+        tip.setLngLat(e.lngLat).setHTML(`<b>${esc(b.name)}</b><br><span style="color:${mapCol(b.state)}">${esc(b.headline || LBL[b.state ?? ""] || "")}</span><br><span style="color:#64748b">Click to see it on its own</span>`).addTo(map);
       });
       map.on("mouseleave", lid, () => { tip.remove(); map.getCanvas().style.cursor = ""; });
     }
-    map.addLayer({ id: "bgy-label", type: "symbol", source: "bgy", filter: ["all", ["has", "state"], ["!=", ["get", "state"], null]] as never, minzoom: 11.5, layout: { visibility: "none",
-      "text-field": ["format", ["upcase", ["get", "name"]], { "font-scale": 0.95 }, "\n", {},
-        ["match", ["get", "state"], "ok", "Working", "attention", "Needs attention", "down", "Not working", "No current data"], { "text-color": ["match", ["get", "state"], "ok", COL.ok, "attention", "#b45309", "down", COL.down, "#64748b"] }] as never,
-      "text-font": ["Noto Sans Bold"], "text-size": 11.5, "text-max-width": 10 },
-      paint: { "text-color": P.ink, "text-halo-color": "#fff", "text-halo-width": 1.6 } });
     map.addSource("pipes", { type: "geojson", data: pipes });
     const tiers: [string, maplibregl.FilterSpecification, number][] = [["trunk", ["in", ["get", "class"], ["literal", ["transmission", "dist_main"]]], 10],
       ["branch", ["==", ["get", "class"], "dist_secondary"], 13.5], ["service", ["==", ["get", "class"], "service"], 15.5]];
@@ -455,8 +682,40 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     for (const id of ["p-trunk", "p-branch", "p-service", "pf-trunk", "pf-branch"])
       map.on("click", id, (e) => { const uid = e.features?.[0]?.properties.uid; const p = pipes.features.find((x) => x.properties.uid === uid); if (p && p.properties.alarm) openPipe(p.properties.uid); });
     map.on("click", "bgy-state", (e) => { const id = e.features?.[0]?.properties.id; if (view === MON.views[3] && bgys().some((x) => x.id === id)) focusBarangay(id); });
+
+    // ---- labels, on top (as QGIS draws labels over every layer)
+    if (bg) {
+      // Sorsogon Barangays' names (the city's): small and light in the city view, larger and dark in the street view
+      map.addSource("bgylabels", { type: "geojson", data: bg.barangayLabels });
+      const city = ["==", ["get", "town"], "Sorsogon City"] as maplibregl.FilterSpecification;
+      map.addLayer({ id: "bgy-name-city", type: "symbol", source: "bgylabels", minzoom: Z.bgyNames, maxzoom: Z.street, filter: city,
+        layout: { "text-field": ["upcase", ["get", "name"]], "text-font": ["Noto Sans Regular"], "text-size": 7 * PX_PER_PT,
+          "text-letter-spacing": 0.065, "text-max-width": 9, "text-padding": 3 },
+        paint: { "text-color": "#7a8699", ...halo, "text-halo-width": 1.6 } });
+      map.addLayer({ id: "bgy-name", type: "symbol", source: "bgylabels", minzoom: Z.street, filter: city,
+        layout: { "text-field": ["upcase", ["get", "name"]], "text-font": ["Noto Sans Bold"], "text-size": 8.2 * PX_PER_PT,
+          "text-letter-spacing": 0.06, "text-max-width": 9, "text-padding": 3 },
+        paint: { "text-color": P.bgyName, ...halo, "text-halo-width": 1.8 } });
+      // Sorsogon Municipalities' names in the province view, Sorsogon City with its water network's summary under it
+      map.addSource("munilabels", { type: "geojson", data: bg.municipalityLabels });
+      map.addLayer({ id: "muni-name", type: "symbol", source: "munilabels", maxzoom: Z.city,
+        layout: { "text-field": ["upcase", ["get", "name"]], "text-font": ["Noto Sans Bold"], "text-size": 9 * PX_PER_PT,
+          "text-letter-spacing": 0.05, "text-max-width": 12, "text-offset": [0, -0.65], "text-allow-overlap": true },
+        paint: { "text-color": P.ink, ...halo, "text-halo-width": 2 } });
+      map.addLayer({ id: "muni-summary", type: "symbol", source: "munilabels", maxzoom: Z.city, filter: ["==", ["get", "name"], "Sorsogon City"],
+        layout: { "text-field": "", "text-font": ["Noto Sans Regular"], "text-size": 8.2 * PX_PER_PT, "text-offset": [0, 0.75],
+          "text-allow-overlap": true, "text-max-width": 40 },
+        paint: { "text-color": COL.ok!, ...halo, "text-halo-width": 2 } });
+    }
+    map.addLayer({ id: "bgy-label", type: "symbol", source: "bgy", filter: ["all", ["has", "state"], ["!=", ["get", "state"], null]] as never, minzoom: 11.5, layout: { visibility: "none",
+      "text-field": ["format", ["upcase", ["get", "name"]], { "font-scale": 0.95 }, "\n", {},
+        ["match", ["get", "state"], "ok", "Working", "attention", "Needs attention", "down", "Not working", "No current data"], { "text-color": ["match", ["get", "state"], "ok", COL.ok, "attention", "#b45309", "down", COL.down, "#64748b"] }] as never,
+      "text-font": ["Noto Sans Bold"], "text-size": 7.6 * PX_PER_PT, "text-max-width": 10 },
+      paint: { "text-color": P.ink, ...halo, "text-halo-width": 1.6 } });
     addMarkers();
     setView(MON.views[0]!);
+    renderCitySummary();
+    map.once("idle", () => onReady?.());
   });
   function zoomClasses() {
     const z = map.getZoom();
@@ -482,7 +741,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
       const parts = twin ? (f.groups || []).map((g) => `<span title="${esc(g.title)}: ${esc(LBL[g.state] || "")}">${MON.groupIcons[g.group]}<i style="background:${COL[g.state] || COL.nodata}"></i></span>`)
         : (f.roles || []).filter((r) => (MON.groupIcons as Record<string, string>)[r]).map((r) => `<span>${(MON.groupIcons as Record<string, string>)[r]}</span>`);
       el.innerHTML = `<span class="dot ${f.state === "down" || f.state === "attention" ? "bad" : ""}" style="background:${COL[f.state ?? ""] || COL.nodata}"></span>` +
-        `<div class="lab"><div class="nm">${esc(f.name)}</div><div class="hl" style="color:${textCol(f.state)}">${esc(hl)}</div></div>` +
+        `<div class="lab"><div class="nm">${esc(f.name)}</div><div class="hl" style="color:${mapCol(f.state)}">${esc(hl)}</div></div>` +
         `<span class="site">${MON.sites[twin || f.kind !== "station" ? f.kind || "station" : "station-muted"] ?? ""}</span>` +
         (twin && !(f.problems || []).length ? `<span class="mini">${MON.badges[f.state!] || MON.badges.nodata}</span>` : "") +
         (twin && (f.problems || []).length ? `<div class="bubble ${f.problems[0]!.state === "down" ? "down" : ""}" title="${esc(f.headline || "")}">` +
@@ -518,6 +777,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
         marker: new maplibregl.Marker({ element: el }).setLngLat([g.lon, g.lat]).addTo(map) });
     }
     applyFocusClasses();
+    select(selUid);
   }
 
   // ---------------------------------------------------------------- views
@@ -555,6 +815,12 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     legend(k);
     zoomClasses();
   }
+  let legendClosed = false;
+  $("#legend").addEventListener("click", (e) => {
+    if (!(e.target as HTMLElement).closest("[data-lg]")) return;
+    legendClosed = !legendClosed;
+    legend(VIEW_KEYS[MON.views.indexOf(view)]!);
+  });
   function legend(k: string) {
     const rows = k === "health"
       ? [["ok", "All sensors reporting"], ["attention", "Some readings late"], ["down", "A sensor is offline"], ["notwin", "Not in the twin yet"]]
@@ -569,7 +835,8 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     }
     if (k !== "health") html += `<div><span class="badge b">${MON.badges.down}</span>Speech bubble: the part with a problem</div>`;
     html += `<div><span class="ln" style="background:repeating-linear-gradient(90deg,${COL.down} 0 6px,transparent 6px 10px)"></span>Reported pipe problem</div>`;
-    $("#legend").innerHTML = html;
+    $("#legend").innerHTML = `<button class="lg-toggle" data-lg>${legendClosed ? "Show" : "Hide"}</button>` + (legendClosed ? `<div class="t">LEGEND</div>` : "") + `<div class="lg-body">${html}</div>`;
+    $("#legend").classList.toggle("closed", legendClosed);
   }
 
   // ---------------------------------------------------------------- live status from the digital twin
@@ -590,7 +857,40 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
       newest ? `latest reading ${age(newest)}` : "no readings yet", lastLive.shifted ? "reading times moved to now (demo)" : ""].filter(Boolean).join(" · ");
     renderHeader();
   }
+  // ---- toasts: a station or gauge that just got a problem (or got well again), as the twin reports it
+  const toastTimers: ReturnType<typeof setTimeout>[] = [];
+  function toast(st: MonState, kind: string, name: string, text: string | null, open: () => void) {
+    const box = $("#toasts");
+    const el = document.createElement("div");
+    el.className = `toast ${st}`;
+    el.innerHTML = `${badge(st)}<div><div class="k">${esc(kind)}</div><div class="n">${esc(name)}</div><div class="h">${esc(text || "")}</div></div>`;
+    el.onclick = () => { open(); el.remove(); };
+    box.prepend(el);
+    while (box.children.length > 4) box.lastElementChild!.remove();
+    toastTimers.push(setTimeout(() => { el.classList.add("out"); toastTimers.push(setTimeout(() => el.remove(), 350)); }, 9000));
+  }
+  const worse = (a: string | null | undefined, b: string | null | undefined) => (RANK[a ?? ""] ?? 9) < (RANK[b ?? ""] ?? 9);
+  function announce(prevSt: Map<string, string | null>, prevGa: Map<string, string | null>) {
+    for (const f of stations) {
+      if (!f.twin_id || !prevSt.has(f.uid)) continue;
+      const was = prevSt.get(f.uid);
+      if ((f.state === "down" || f.state === "attention") && worse(f.state, was)) toast(f.state, "New problem · station", f.name, f.headline, () => openStation(f.uid, true));
+      else if (f.state === "ok" && (was === "down" || was === "attention")) toast("ok", "Back to normal · station", f.name, f.headline, () => openStation(f.uid, true));
+    }
+    for (const g of gauges) {
+      if (!g.twin_id || !prevGa.has(g.uid)) continue;
+      const was = prevGa.get(g.uid);
+      if ((g.state === "down" || g.state === "attention" || g.state === "nodata") && worse(g.state, was))
+        toast(g.state, `${g.state === "nodata" ? "Not reporting" : "New problem"} · ${g.type === "pressure_logger" ? "pressure point" : "chlorine"}`, g.name, g.headline, () => openGauge(g.uid, true));
+      else if (g.state === "ok" && (was === "down" || was === "attention" || was === "nodata"))
+        toast("ok", "Back to normal · gauge", g.name, g.headline, () => openGauge(g.uid, true));
+    }
+  }
+
   function applyLive(s: LiveResponse) {
+    // what each station and gauge was before this update (none before the first: that is no news)
+    const prevSt = new Map(lastLive ? stations.map((f) => [f.uid, f.state] as const) : []);
+    const prevGa = new Map(lastLive ? gauges.map((g) => [g.uid, g.state] as const) : []);
     lastLive = s;
     live = "live";
     const M = s.monitor;
@@ -624,6 +924,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     }
     city = M.city;
     renderAll();
+    announce(prevSt, prevGa);
   }
   function renderAll() {
     renderHeader();
@@ -666,6 +967,8 @@ export function startMonitor(root: HTMLElement, gis: GisData, province: Province
     es.close();
     clearInterval(tick);
     detail.removeEventListener("click", onDetailClick);
+    detail.removeEventListener("toggle", onToggle, true);
+    for (const t of toastTimers) clearTimeout(t);
     document.removeEventListener("keydown", onKey);
     map.remove();
   };

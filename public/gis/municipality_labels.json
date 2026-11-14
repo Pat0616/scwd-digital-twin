@@ -1,0 +1,22 @@
+{
+"type": "FeatureCollection",
+"name": "municipality_labels",
+"xy_coordinate_resolution": 1e-06,
+"features": [
+{"type":"Feature","properties":{"name":"Barcelona"},"geometry":{"type":"Point","coordinates":[124.11683,12.84056]}},
+{"type":"Feature","properties":{"name":"Bulan"},"geometry":{"type":"Point","coordinates":[123.931749,12.659882]}},
+{"type":"Feature","properties":{"name":"Bulusan"},"geometry":{"type":"Point","coordinates":[124.103247,12.752687]}},
+{"type":"Feature","properties":{"name":"Casiguran"},"geometry":{"type":"Point","coordinates":[124.033573,12.864453]}},
+{"type":"Feature","properties":{"name":"Castilla"},"geometry":{"type":"Point","coordinates":[123.812807,12.9446]}},
+{"type":"Feature","properties":{"name":"Donsol"},"geometry":{"type":"Point","coordinates":[123.574072,12.963024]}},
+{"type":"Feature","properties":{"name":"Gubat"},"geometry":{"type":"Point","coordinates":[124.101554,12.918776]}},
+{"type":"Feature","properties":{"name":"Irosin"},"geometry":{"type":"Point","coordinates":[124.026938,12.718179]}},
+{"type":"Feature","properties":{"name":"Juban"},"geometry":{"type":"Point","coordinates":[123.978045,12.805108]}},
+{"type":"Feature","properties":{"name":"Magallanes"},"geometry":{"type":"Point","coordinates":[123.886859,12.813217]}},
+{"type":"Feature","properties":{"name":"Matnog"},"geometry":{"type":"Point","coordinates":[124.041656,12.603613]}},
+{"type":"Feature","properties":{"name":"Pilar"},"geometry":{"type":"Point","coordinates":[123.665655,12.935825]}},
+{"type":"Feature","properties":{"name":"Prieto Diaz"},"geometry":{"type":"Point","coordinates":[124.165847,13.036352]}},
+{"type":"Feature","properties":{"name":"Santa Magdalena"},"geometry":{"type":"Point","coordinates":[124.079342,12.652337]}},
+{"type":"Feature","properties":{"name":"Sorsogon City"},"geometry":{"type":"Point","coordinates":[123.97241,13.020909]}}
+]
+}

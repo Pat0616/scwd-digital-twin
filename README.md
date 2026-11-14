@@ -55,13 +55,19 @@ the values in the GIS export.
    This writes `public/gis/*.json`, copies the relief images and prints how many features are linked to the twin.
    Reload the page to see the new geometry. The script refuses an export that is not the Monitor project's.
 
-**Province outline** (`public/gis/province.json`): the map is held to Sorsogon (it cannot pan or zoom out past the
-province) and everything outside it is veiled, as in scwd-frontend. It is not in the QGIS web export, so `import-gis`
-leaves it alone. It comes from `data/sorsogon_admin.gpkg`; to write it again (GDAL ships with QGIS):
+**Background (the QGIS project's own map, no online basemap).** The map draws the Monitor project's background
+layers exactly as the plugin styles them (`monitor_style.py`): Outside Mask (sea), Sorsogon Municipalities (land,
+borders, names, and the "SCWD water: …" summary under Sorsogon City in the province view), Province relief,
+Municipality borders, Sorsogon Barangays (land, borders, the city's barangay names), City relief, Served Area and
+Streets. They are not in the web export; write them from the project's GeoPackages with:
 
 ```
-ogr2ogr -f GeoJSON public/gis/province.json C:\Users\pagda\water-gis\data\sorsogon_admin.gpkg province -simplify 0.0005 -select label -lco COORDINATE_PRECISION=5 -lco RFC7946=YES
+npm run import-background                        # reads ~/water-gis/data, uses QGIS's ogr2ogr
+npm run import-background -- D:\path\to\data
 ```
+
+The map is held to the province (it cannot pan or zoom out past it). Only the label fonts come from the internet
+(OpenFreeMap's font server).
 
 ## Twin source
 
