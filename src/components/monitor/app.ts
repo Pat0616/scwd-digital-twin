@@ -90,6 +90,8 @@ export interface Background {
   barangays: AreaData;
   barangayLabels: GeoJSON.FeatureCollection<GeoJSON.Point>;
   streets: GeoJSON.FeatureCollection<GeoJSON.LineString | GeoJSON.MultiLineString>;
+  /** TRIAL: OpenStreetMap roads of the rest of the province (streets covers Sorsogon City only) */
+  provinceRoads?: GeoJSON.FeatureCollection<GeoJSON.LineString>;
 }
 const PROVINCE_PAD = 0.02;  // degrees (about 2 km) the map may show past the province's edge
 
@@ -588,7 +590,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     layers: [{ id: "canvas", type: "background", paint: { "background-color": "#ffffff" } }],
   };
   const map: MlMap = new maplibregl.Map({ container: mapEl, style, bounds: CITY_BOUNDS, maxBounds: lockedBounds(extent, mapEl),
-    renderWorldCopies: false, attributionControl: { compact: true, customAttribution: "Sorsogon Water Monitor (QGIS) · streets © OpenStreetMap contributors" } });
+    renderWorldCopies: false, attributionControl: { compact: true, customAttribution: "Sorsogon Water Monitor (QGIS) · streets and roads © OpenStreetMap contributors" } });
   map.on("resize", () => map.setMaxBounds(lockedBounds(extent, mapEl)));
   // development only: lets a test browser check the map (marker positions, bounds)
   if (process.env.NODE_ENV !== "production") (window as unknown as { __monitorMap?: MlMap }).__monitorMap = map;
@@ -648,20 +650,27 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     if (bg) {
       // Streets: white with a light edge; majors from the city view, mid from 1:60,000, minor from 1:30,000
       map.addSource("streets", { type: "geojson", data: bg.streets });
+      // TRIAL: the other municipalities' roads, drawn as the city's (no file = the city's streets only)
+      const roadSources = ["streets"];
+      if (bg.provinceRoads) { map.addSource("provroads", { type: "geojson", data: bg.provinceRoads }); roadSources.unshift("provroads"); }
       const roads: [string, number, number][] = CITY_COLOUR_RELIEF
         ? [["minor", 0.5, Z.mid], ["mid", 0.9, Z.city + 0.3], ["major", 1.4, Z.city]]      // the road map shows sooner
         : [["minor", 0.5, Z.minor], ["mid", 0.9, Z.mid], ["major", 1.4, Z.city]];
       // over the coloured relief (city view) the roads get a darker outline; the street view keeps the light one
       const edge = CITY_COLOUR_RELIEF ? ["step", ["zoom"], CITY_ROAD_EDGE, Z.street, STREET_EDGE] : STREET_EDGE;
-      for (const [cls, w, z] of roads)
-        map.addLayer({ id: `street-edge-${cls}`, type: "line", source: "streets", minzoom: z, filter: ["==", ["get", "class"], cls],
-          layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": edge as never, "line-width": (w + 0.4) * PX_PER_MM } });
-      for (const [cls, w, z] of roads)
-        map.addLayer({ id: `street-${cls}`, type: "line", source: "streets", minzoom: z, filter: ["==", ["get", "class"], cls],
-          layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": STREET, "line-width": w * PX_PER_MM } });
-      map.addLayer({ id: "street-name", type: "symbol", source: "streets", minzoom: Z.streetNames,
-        layout: { "symbol-placement": "line", "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 7 * PX_PER_PT },
-        paint: { "text-color": "#8a94a6", ...halo, "text-halo-width": 1.4 } });
+      const sfx = (src: string) => (src === "streets" ? "" : `-${src}`);           // the city's layers keep their ids
+      for (const src of roadSources)
+        for (const [cls, w, z] of roads)
+          map.addLayer({ id: `street-edge-${cls}${sfx(src)}`, type: "line", source: src, minzoom: z, filter: ["==", ["get", "class"], cls],
+            layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": edge as never, "line-width": (w + 0.4) * PX_PER_MM } });
+      for (const src of roadSources)
+        for (const [cls, w, z] of roads)
+          map.addLayer({ id: `street-${cls}${sfx(src)}`, type: "line", source: src, minzoom: z, filter: ["==", ["get", "class"], cls],
+            layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": STREET, "line-width": w * PX_PER_MM } });
+      for (const src of roadSources)
+        map.addLayer({ id: `street-name${sfx(src)}`, type: "symbol", source: src, minzoom: Z.streetNames,
+          layout: { "symbol-placement": "line", "text-field": ["coalesce", ["get", "name"], ""], "text-font": ["Noto Sans Regular"], "text-size": 7 * PX_PER_PT },
+          paint: { "text-color": "#8a94a6", ...halo, "text-halo-width": 1.4 } });
     }
     map.addSource("focusmask", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     map.addLayer({ id: "focus-veil", type: "fill", source: "focusmask", paint: { "fill-color": "#ffffff", "fill-opacity": 0.7 } });

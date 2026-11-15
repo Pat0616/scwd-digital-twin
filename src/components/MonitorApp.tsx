@@ -44,6 +44,8 @@ export default function MonitorApp() {
       const bgEntries = await Promise.all(Object.entries(BG).map(async ([key, file]) =>
         [key, await fetch(`/gis/${file}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null)] as const));
       const bg = bgEntries.every(([, v]) => v) ? (Object.fromEntries(bgEntries) as unknown as Background) : null;
+      // TRIAL: the rest of the province's roads (scripts/fetch-province-roads.ts); optional, drawn when the file is there
+      if (bg) bg.provinceRoads = await fetch("/gis/province_roads.json").then((r) => (r.ok ? r.json() : undefined)).catch(() => undefined);
       if (!bg) console.warn("Background layers missing: run `npm run import-background`.");
       const { startMonitor } = await import("./monitor/app");
       if (!cancelled && root.current) {
