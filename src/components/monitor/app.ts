@@ -574,6 +574,10 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
   const PX_PER_MM = 3.78, PX_PER_PT = 1.333;                 // QGIS sizes (96 dpi) as screen pixels
   const Z = { city: 11, bgyNames: 11.45, mid: 12, minor: 12.8, street: 13, streetNames: 14.6 };   // 1:100k, 60k, 30k, 6k
   const SEA = "#c9dceb", LAND = P.land, STREET = "#ffffff", STREET_EDGE = "#dcdfe3", MUNI_LINE = "#b8c2cf";
+  // TRIAL (2026-11-15): the city view over the coloured relief (the province view's) instead of the washed one, with
+  // a lighter served tint and outlined roads so the road map reads over it. false = back to the QGIS look.
+  const CITY_COLOUR_RELIEF = true;
+  const CITY_ROAD_EDGE = "#8f9aa8";                          // road outline over the coloured relief
   // held to Sorsogon (as scwd-frontend): it opens on the city, and can neither pan nor zoom out past the province
   const extent: Extent = bg ? bboxOfAll(bg.municipalities) : [[gis.meta.bounds[0], gis.meta.bounds[1]], [gis.meta.bounds[2], gis.meta.bounds[3]]];
   const style: maplibregl.StyleSpecification = {
@@ -624,13 +628,16 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
       map.addLayer({ id: "bgy-land", type: "fill", source: "barangays", minzoom: Z.city, paint: { "fill-color": LAND } });
       map.addLayer({ id: "bgy-land-edge", type: "line", source: "barangays", minzoom: Z.city, paint: { "line-color": P.border, "line-width": 0.45 * PX_PER_MM } });
     }
-    relief(1);                                             // City relief (city view)
+    if (CITY_COLOUR_RELIEF && map.getSource("relief")) {   // City relief: the coloured one, a little see-through
+      map.addLayer({ id: "relief-city", type: "raster", source: "relief", minzoom: Z.city, maxzoom: Z.street,
+        paint: { "raster-opacity": 0.88, "raster-fade-duration": 0, "raster-resampling": "linear" } });
+    } else relief(1);                                      // City relief (city view, washed light)
     // Served Area (from Barangay Monitoring): city view one soft tint; street view the barangays in 4 soft colours
     // with their borders, the served ones with an inner SCWD-blue line
     map.addSource("bgy", { type: "geojson", data: areas });
     const SERVED = ["!=", ["get", "status"], "not_served"] as maplibregl.FilterSpecification;
     map.addLayer({ id: "served-city", type: "fill", source: "bgy", minzoom: Z.city, maxzoom: Z.street, filter: SERVED,
-      paint: { "fill-color": P.served, "fill-opacity": 0.55 } });
+      paint: { "fill-color": P.served, "fill-opacity": CITY_COLOUR_RELIEF ? 0.22 : 0.55 } });
     const PASTEL = ["match", ["coalesce", ["get", "pastel"], 0], 1, P.pastels["1"], 2, P.pastels["2"], 3, P.pastels["3"], 4, P.pastels["4"], LAND];
     map.addLayer({ id: "served", type: "fill", source: "bgy", minzoom: Z.street, paint: { "fill-color": PASTEL as never } });
     map.addLayer({ id: "bgy-line", type: "line", source: "bgy", minzoom: Z.street, paint: { "line-color": P.border, "line-width": 0.45 * PX_PER_MM } });
@@ -641,10 +648,14 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     if (bg) {
       // Streets: white with a light edge; majors from the city view, mid from 1:60,000, minor from 1:30,000
       map.addSource("streets", { type: "geojson", data: bg.streets });
-      const roads: [string, number, number][] = [["minor", 0.5, Z.minor], ["mid", 0.9, Z.mid], ["major", 1.4, Z.city]];
+      const roads: [string, number, number][] = CITY_COLOUR_RELIEF
+        ? [["minor", 0.5, Z.mid], ["mid", 0.9, Z.city + 0.3], ["major", 1.4, Z.city]]      // the road map shows sooner
+        : [["minor", 0.5, Z.minor], ["mid", 0.9, Z.mid], ["major", 1.4, Z.city]];
+      // over the coloured relief (city view) the roads get a darker outline; the street view keeps the light one
+      const edge = CITY_COLOUR_RELIEF ? ["step", ["zoom"], CITY_ROAD_EDGE, Z.street, STREET_EDGE] : STREET_EDGE;
       for (const [cls, w, z] of roads)
         map.addLayer({ id: `street-edge-${cls}`, type: "line", source: "streets", minzoom: z, filter: ["==", ["get", "class"], cls],
-          layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": STREET_EDGE, "line-width": (w + 0.4) * PX_PER_MM } });
+          layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": edge as never, "line-width": (w + 0.4) * PX_PER_MM } });
       for (const [cls, w, z] of roads)
         map.addLayer({ id: `street-${cls}`, type: "line", source: "streets", minzoom: z, filter: ["==", ["get", "class"], cls],
           layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": STREET, "line-width": w * PX_PER_MM } });
