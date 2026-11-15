@@ -5,8 +5,7 @@ import type { BandKey, GisData, Reading, ReadingGroup, Role } from "@/lib/gis/ty
 import { readingsOf, type TwinReading } from "@/lib/twin/readings";
 import type { Twin, TwinGraph, TwinSourceKind } from "@/lib/twin/types";
 import {
-  BGY_STATUS, ROLE_OF_MODEL, ROLE_ORDER, STALE_READING_HOURS, alarmText, bandFor, bgyStatus, gaugeBand, hoursOld,
-  isOnline, modelName, readingText, stationAlerts, type PartState,
+  BGY_STATUS, ROLE_OF_MODEL, ROLE_ORDER, alarmText, bandFor, bgyStatus, gaugeBand, isOnline, modelName, readingText, stationAlerts, type PartState,
 } from "./rules";
 import type {
   BarangayStatus, GaugeStatus, PartStatus, PipeStatus, StationStatus, StatusResponse,
@@ -117,7 +116,7 @@ export function gaugeStatus(idx: TwinIndex, gauge: Twin, now: Date): GaugeStatus
   const kind = r.kind === "pressure" ? "pressure" : "chlorine";
   return {
     kind, value, unit: r.unit, time, online, status: online ? "operational" : "offline",
-    band: kind === "pressure" ? gaugeBand(value, hoursOld(time, now), online) : null, alarm: alarmText(r),
+    band: kind === "pressure" ? gaugeBand(value, online) : null, alarm: alarmText(r),
   };
 }
 
@@ -133,10 +132,9 @@ export function pipeStatus(pipe: Twin): PipeStatus {
 export function barangayStatuses(
   gis: StatusGis, stations: Record<string, StationStatus>, gauges: Record<string, GaugeStatus>, now: Date,
 ): Record<string, BarangayStatus> {
-  const fresh = (g: GaugeStatus | undefined): g is GaugeStatus & { value: number } => {
-    const h = hoursOld(g?.time, now);
-    return !!g && g.kind === "pressure" && g.online && g.value != null && h != null && h <= STALE_READING_HOURS;
-  };
+  // a DPP's reading counts while its sensor is online, however long ago the value last changed
+  const fresh = (g: GaugeStatus | undefined): g is GaugeStatus & { value: number } =>
+    !!g && g.kind === "pressure" && g.online && g.value != null;
   const pipeBand = (p: { band: BandKey | null; dpp_twin_id: string | null }) =>
     (p.dpp_twin_id && gauges[p.dpp_twin_id]?.band) || p.band;
   const out: Record<string, BarangayStatus> = {};
@@ -159,7 +157,7 @@ export function barangayStatuses(
     for (const p of pipes) if (p.dpp_twin_id) dppIds.add(p.dpp_twin_id);
     const readings = [...dppIds].map((id) => gauges[id]).filter(fresh);
     const lowest = readings.reduce<(typeof readings)[number] | null>((lo, g) => (lo && lo.value <= g.value ? lo : g), null);
-    const bands = new Set<BandKey | null>([...pipes.map(pipeBand), ...readings.map((g) => bandFor(g.value, 0))]);
+    const bands = new Set<BandKey | null>([...pipes.map(pipeBand), ...readings.map((g) => bandFor(g.value))]);
     const status = bgyStatus(bands, alerts, served.has(b.id));
     const def = BGY_STATUS.find(([k]) => k === status)!;
     out[b.id] = { status, label: def[1], color: def[2], psi: lowest?.value ?? null, time: lowest?.time ?? null, alerts };

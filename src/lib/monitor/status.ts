@@ -7,7 +7,7 @@ import type {
   BgyStatusKey, CardGroup, CardReading, DataHealth, Facility, MonGroup, MonState, ProblemPart,
 } from "@/lib/gis/types";
 import type { StatusGis, TwinIndex } from "@/lib/status/compute";
-import { BGY_STATUS, STALE_READING_HOURS, alarmText, bandFor, fmtG, hoursOld, modelName } from "@/lib/status/rules";
+import { BGY_STATUS, alarmText, bandFor, fmtG, modelName } from "@/lib/status/rules";
 import type { StatusResponse } from "@/lib/status/types";
 import type { TwinReading } from "@/lib/twin/readings";
 import type { Twin } from "@/lib/twin/types";
@@ -34,8 +34,8 @@ const PART_SLOT: Record<string, MonGroup> = {
 };
 export const slotOf = (model: string | null | undefined): MonGroup | null => PART_SLOT[model ?? ""] ?? null;
 
-/** A sensor silent for longer than this is "late" (data health view). */
-export const LATE_HOURS = 1;
+// Data health is the sensors' online flags only: a reading whose value has not changed for a while is not "late"
+// (the twin's readings_at moves only when a value is written). See lib/status/rules.ts.
 
 /** The next step for the control room, by the plain problem text (first match wins). */
 const ADVICE: [string, string][] = [
@@ -214,9 +214,7 @@ export function stationResult(station: Twin, parts: Twin[], sensors: TwinReading
   if (down && !ordered.length) ordered.push({ state: "down", text: "Station not working", group: "pumping" });
   let data: DataHealth = "none";
   if (sensors.length) {
-    if (sensors.some((s) => s.sensor_online === false)) data = "offline";
-    else if (sensors.some((s) => (hoursOld(s.readings_at, now) ?? 0) > LATE_HOURS)) data = "late";
-    else data = "live";
+    data = sensors.some((s) => s.sensor_online === false) ? "offline" : "live";
   }
   let headline = ordered[0]?.text ?? (standby ? "On standby" : "All working");
   if (ordered.length > 1) headline += ` (+${ordered.length - 1} more)`;
@@ -267,13 +265,12 @@ export interface GaugeResult { state: MonState; headline: string; data: DataHeal
 
 /** State and plain headline for a gauge (monitor_status.meter_status). */
 export function gaugeResult(type: string, reading: { value: number | null; time: string | null; online: boolean }, now: Date): GaugeResult {
-  const hours = hoursOld(reading.time, now);
   if (!reading.online) return { state: "nodata", headline: "Not reporting", data: "offline" };
-  const data: DataHealth = hours != null && hours > LATE_HOURS ? "late" : hours != null ? "live" : "none";
+  const data: DataHealth = "live";                    // online: reporting, however long its value has been the same
   const v = reading.value;
   if (type === "pressure_logger") {
-    if (v == null || (hours != null && hours > STALE_READING_HOURS)) return { state: "nodata", headline: "No current reading", data };
-    const band = bandFor(v, hours);
+    if (v == null) return { state: "nodata", headline: "No current reading", data };
+    const band = bandFor(v);
     const txt = `${fmtG(v)} psi`;
     const state: MonState = band === "very_low" ? "down" : band === "low" || band === "high" ? "attention" : "ok";
     const headline = band === "very_low" ? `Water pressure very low (${txt})` : band === "low" ? `Water pressure low (${txt})`

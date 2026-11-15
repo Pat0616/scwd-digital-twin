@@ -24,8 +24,9 @@ export const ROLE_TITLES: Record<Role, string> = {
   generator: "Power & telemetry",
 };
 
-/** A reading older than this is no current reading. */
-export const STALE_READING_HOURS = 24;
+// A reading's age does not say whether its sensor works: the twin's readings_at only moves when a value is written,
+// and a sensor reading the same pressure for days is still reporting. Only <base>_sensor_online = false is "no
+// current reading" (user, 2026-11-15).
 /** SCWD's minimum pressure at its Designated Pressure Points (DPPs). */
 export const MIN_DPP_PSI = 7;
 
@@ -43,7 +44,7 @@ export const BGY_STATUS: [BgyStatusKey, string, string][] = [
   ["low", "Low pressure", "#e65100"],
   ["station_alert", "Alert (station or gauge)", "#6a1b9a"],
   ["high", "High pressure", "#1565c0"],
-  ["no_reading", "No recent reading", "#616161"],
+  ["no_reading", "Pressure point offline", "#616161"],
   ["no_gauge", "No pressure point (DPP) yet", "#9fb6c3"],
   ["normal", "Normal", "#2e7d32"],
   ["not_served", "Not served", "#d7ccc8"],
@@ -114,19 +115,18 @@ export function readingText(s: ReadingLike): string {
   return "—";
 }
 
-/** Pressure band of a reading; hoursOld null means the time is unknown (setup_layers.band_for). */
-export function bandFor(psi: number | null, hoursOld: number | null): BandKey {
+/** Pressure band of a reading, however old (setup_layers.band_for). */
+export function bandFor(psi: number | null): BandKey {
   if (psi == null) return "none";
-  if (hoursOld != null && hoursOld > STALE_READING_HOURS) return "stale";
   for (const [key, lo, hi] of PRESSURE_BANDS) if ((lo == null || psi >= lo) && (hi == null || psi < hi)) return key;
   return "none";
 }
 
-/** A DPP's band: an offline gauge or a stale reading counts as no current reading (map_look.refresh_dmas). */
-export function gaugeBand(psi: number | null, hoursOld: number | null, online: boolean): BandKey {
+/** A DPP's band: an offline gauge counts as no current reading ("stale"; map_look.refresh_dmas). */
+export function gaugeBand(psi: number | null, online: boolean): BandKey {
   if (psi == null) return "none";
   if (!online) return "stale";
-  return bandFor(psi, hoursOld);
+  return bandFor(psi);
 }
 
 /** Hours between an ISO time and now; null when there is no time. */
@@ -165,6 +165,6 @@ export function bgyStatus(bands: Set<BandKey | null>, alerts: number, served: bo
   if (alerts) return "station_alert";
   if (bands.has("high")) return "high";
   if (bands.has("ok")) return "normal";
-  // a gauge that stopped reporting vs. a served barangay with no pressure point in the digital twin yet
+  // a gauge that is offline vs. a served barangay with no pressure point in the digital twin yet
   return bands.has("stale") ? "no_reading" : "no_gauge";
 }

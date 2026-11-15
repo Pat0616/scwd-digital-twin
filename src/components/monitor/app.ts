@@ -823,7 +823,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
   });
   function legend(k: string) {
     const rows = k === "health"
-      ? [["ok", "All sensors reporting"], ["attention", "Some readings late"], ["down", "A sensor is offline"], ["notwin", "Not in the twin yet"]]
+      ? [["ok", "All sensors reporting"], ["down", "A sensor is offline"], ["notwin", "Not in the twin yet"]]
       : [["ok", "Working"], ["attention", "Needs attention"], ["down", "Not working"], ["nodata", "No current data"], ["notwin", "Not in the twin yet"]];
     let html = `<div class="t">${k === "pressure" ? "WATER PRESSURE" : k === "barangays" ? "BARANGAYS" : k === "health" ? "DATA HEALTH" : "STATE"}</div>`;
     if (k === "pressure") html += [[COL.ok, "OK (7 psi or more)"], [COL.attention, "Low (3–7 psi)"], [COL.down, "Very low (under 3 psi)"], ["#b8c2cf", "No pressure point nearby"]].map(([c, t]) => `<div><span class="ln" style="background:${c}"></span>${t}</div>`).join("");

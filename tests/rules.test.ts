@@ -56,19 +56,16 @@ describe("pressure bands (SCWD minimum 7 psi)", () => {
   it.each([
     [0, "very_low"], [1.5, "very_low"], [2.99, "very_low"], [3, "low"], [5.8, "low"], [6.99, "low"],
     [7, "ok"], [32, "ok"], [79.9, "ok"], [80, "high"], [120, "high"],
-  ] as const)("%s psi is %s", (psi, band) => expect(bandFor(psi, 0)).toBe(band));
+  ] as const)("%s psi is %s", (psi, band) => expect(bandFor(psi)).toBe(band));
 
-  it("no value is no reading; an old reading is stale", () => {
-    expect(bandFor(null, 0)).toBe("none");
-    expect(bandFor(14.5, 25)).toBe("stale");
-    expect(bandFor(14.5, 24)).toBe("ok");
-    expect(bandFor(14.5, null)).toBe("ok");
+  it("no value is no reading", () => {
+    expect(bandFor(null)).toBe("none");
   });
 
-  it("an offline gauge counts as no current reading", () => {
-    expect(gaugeBand(9.6, 1, false)).toBe("stale");
-    expect(gaugeBand(9.6, 1, true)).toBe("ok");
-    expect(gaugeBand(null, 1, false)).toBe("none");
+  it("only an offline gauge counts as no current reading, not an old value", () => {
+    expect(gaugeBand(9.6, false)).toBe("stale");
+    expect(gaugeBand(9.6, true)).toBe("ok");
+    expect(gaugeBand(null, false)).toBe("none");
   });
 });
 

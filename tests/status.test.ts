@@ -101,11 +101,13 @@ describe("a change in the twin clears its alert on the next read", () => {
     expect(st.alert_slot).toBe(3);
   });
 
-  it("a reading older than 24 h no longer counts as a current reading", () => {
+  it("a reading whose value has not changed for days still counts while its sensor is online", () => {
     const g = fixtureGraph();
-    shiftTimes(g.twins, new Date(NOW.getTime() - 30 * 3.6e6));
+    shiftTimes(g.twins, new Date(NOW.getTime() - 10 * 24 * 3.6e6));
     const s = status(g);
-    expect(s.gauges["dpp-san-juan-3"]!.band).toBe("stale");
+    const dpp = Object.values(s.gauges).find((x) => x.kind === "pressure" && x.online && x.value != null)!;
+    expect(dpp.band).not.toBe("stale");
+    expect(Object.values(s.gauges).filter((x) => x.kind === "pressure" && !x.online).every((x) => x.band === "stale")).toBe(true);
   });
 });
 

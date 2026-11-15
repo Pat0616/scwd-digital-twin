@@ -227,14 +227,19 @@ header.top .live.error { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 11
 
 /* ---------------------------------------------------------------- map markers (as the QGIS Monitor) */
 .st { position: relative; cursor: pointer; }
-.st .site { display: block; width: 44px; height: 33px; filter: drop-shadow(0 1px 2px rgba(29,53,87,.35)); }
+/* the pictures a little bigger, most close up (as STATION_GROW in the QGIS monitor_style.py); the label, parts row
+   and bubble sit against the picture's edge (100% = its height), so they follow its size */
+.st .site { display: block; width: 51px; height: 38px; filter: drop-shadow(0 1px 2px rgba(29,53,87,.35)); }
 .st .site svg { width: 100%; height: 100%; display: block; }
-.st.notwin .site { width: 32px; height: 24px; }
+.st.notwin .site { width: 37px; height: 28px; }
+#map.z-close .st:not(.reservoir):not(.spring) .site { width: 68px; height: 51px; }
+#map.z-close .st.notwin:not(.reservoir):not(.spring) .site { width: 50px; height: 37px; }
+#map.z-close .st.reservoir .site, #map.z-close .st.spring .site { width: 32px; height: 32px; }
 .st.reservoir .site, .st.spring .site { width: 24px; height: 24px; }
 .st .mini { position: absolute; top: -6px; right: -7px; width: 17px; height: 17px; }
 .st .mini svg { width: 100%; height: 100%; display: block; }
 /* the speech bubble over a station with a problem: the logo of each problem part with its sign */
-.st .bubble { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); transform-origin: 50% 100%;
+.st .bubble { position: absolute; left: 50%; bottom: calc(100% + 7px); transform: translateX(-50%); transform-origin: 50% 100%;
   display: flex; gap: 4px; padding: 5px 7px;
   background: #fff; border: 2.5px solid var(--attention); border-radius: 10px; cursor: pointer;
   box-shadow: 0 2px 6px rgba(29,53,87,.25); white-space: nowrap; }
@@ -246,16 +251,16 @@ header.top .live.error { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 11
 .st .bubble span svg { width: 30px; height: 30px; display: block; }
 .st .bubble span b { position: absolute; top: -6px; right: -7px; width: 16px; height: 16px; }
 .st .bubble span b svg { width: 16px; height: 16px; }
-#map.z-close .st .bubble { transform: translateX(-50%) scale(1.4); bottom: 44px; }
+#map.z-close .st .bubble { transform: translateX(-50%) scale(1.4); bottom: calc(100% + 11px); }
 @keyframes pulse { 0%, 100% { box-shadow: 0 2px 6px rgba(29,53,87,.25); }
   50% { box-shadow: 0 0 0 5px rgba(211,47,47,.18), 0 2px 6px rgba(29,53,87,.25); } }
 #map.v-health .st .bubble { display: none; }
 #map.v-health .st .mini { display: block !important; }
-.st .lab { position: absolute; top: 36px; left: 50%; transform: translateX(-50%); white-space: nowrap;
+.st .lab { position: absolute; top: calc(100% + 3px); left: 50%; transform: translateX(-50%); white-space: nowrap;
   text-align: center; pointer-events: none; text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff; display: none; }
 .st .lab .nm { font-weight: 700; font-size: 12px; color: var(--ink); }
 .st .lab .hl { font-size: 11.5px; font-weight: 600; }
-.st .eq { position: absolute; top: 36px; left: 50%; transform: translateX(-50%); display: none; gap: 3px; }
+.st .eq { position: absolute; top: calc(100% + 3px); left: 50%; transform: translateX(-50%); display: none; gap: 3px; }
 .st .eq span { position: relative; width: 20px; height: 20px; background: #fff; border: 1px solid #cbd5e1;
   border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
 .st .eq span svg { width: 15px; height: 15px; }
@@ -264,7 +269,7 @@ header.top .live.error { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 11
 #map.z-label .st:not(.notwin) .lab, #map.z-close .st .lab { display: block; }
 #map.z-close .st.station .eq, #map.v-equipment .st.station .eq { display: flex; }
 #map.v-equipment .st:not(.notwin) .lab { display: block; }
-#map.z-close .st.station .lab, #map.v-equipment .st.station .lab { top: 62px; }
+#map.z-close .st.station .lab, #map.v-equipment .st.station .lab { top: calc(100% + 29px); }
 .st .dot { display: none; width: 11px; height: 11px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(29,53,87,.4); }
 .st .dot.bad { width: 15px; height: 15px; }
 #map.z-province .st .site, #map.z-province .st .mini, #map.z-province .st .bubble, #map.z-province .st .eq,
@@ -274,12 +279,12 @@ header.top .live.error { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 11
 #map.z-city .st .site { transform: scale(.72); }
 #map.z-city .st.notwin .site { transform: scale(.6); opacity: .85; }
 #map.z-city .st .mini { transform: scale(.8); top: -1px; right: 0; }
-#map.z-city .st .bubble { transform: translateX(-50%) scale(.9); bottom: 30px; }
+#map.z-city .st .bubble { transform: translateX(-50%) scale(.9); bottom: calc(100% - 4px); }
 .st.dim, .gw.dim { opacity: .18; }
 .st.dim .bubble, .st.dim .lab, .st.dim .eq, .gw.dim .glab { display: none !important; }
 #map .st.focus:not(.notwin) .lab, #map .st.focus .lab { display: block; }
 #map .st.focus.station .eq { display: flex; }
-#map .st.focus.station .lab { top: 62px; }
+#map .st.focus.station .lab { top: calc(100% + 29px); }
 #map .gw.focus .glab { display: block; }
 #map .gw.focus .ga.hide { display: block; }
 /* the selected station or gauge: a cyan halo */
