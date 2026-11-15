@@ -11,6 +11,8 @@ import { GROUPS, slotOf } from "@/lib/monitor/status";
 import type { TwinDetail } from "@/lib/status/detail";
 import type { LiveResponse } from "@/lib/status/types";
 import { gaugeSvg } from "./gauge";
+import { startScada } from "./scada";
+import type { Alarm } from "@/lib/scada/types";
 
 type Gauge = MeterProps & { lon: number; lat: number };
 type Bgy = BgyAreaProps;
@@ -272,7 +274,9 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     if (!list.length) return "";
     return `<div class="tiles">` + list.map((s) => {
       const lim = [s.min != null ? `min ${s.min}` : "", s.max != null ? `max ${s.max}` : ""].filter(Boolean).join(" · ");
-      return `<div class="tile ${s.alarm || s.offline ? "alarm" : ""}" title="${esc(s.alarm || "")}"><div class="tn" title="${esc(s.name)}">${esc(s.name)}</div><div class="tv">${esc(s.value)}</div>` +
+      // a numeric reading opens its trend in the faceplate
+      const trend = s.twin_id && s.property && /\d/.test(s.value) ? ` data-act="trend" data-key="${esc(`${s.twin_id}|${s.property}`)}"` : "";
+      return `<div class="tile ${s.alarm || s.offline ? "alarm" : ""} ${trend ? "trendable" : ""}"${trend} title="${esc(s.alarm || (trend ? "Show its trend" : ""))}"><div class="tn" title="${esc(s.name)}">${esc(s.name)}</div><div class="tv">${esc(s.value)}</div>` +
         (s.pct != null ? `<div class="bar"><i style="width:${Math.max(0, Math.min(100, s.pct))}%"></i></div>` : "") +
         `<div class="tm">${esc([lim, s.offline ? "sensor offline" : age(s.time)].filter(Boolean).join(" · "))}</div></div>`;
     }).join("") + `</div>`;
@@ -329,7 +333,8 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
         (f.notes ? `<div class="note">${esc(f.notes)}</div>` : ""));
       return;
     }
-    let html = head(f.name, f.state, (f.headline || "").split(" (+")[0], where) + todo(f);
+    let html = head(f.name, f.state, (f.headline || "").split(" (+")[0], where) +
+      `<button class="fpbtn" data-act="faceplate" data-uid="${esc(f.uid)}">Open faceplate · schematic and trends</button>` + todo(f);
     // the seven equipment groups at a glance
     const byGroup = new Map(f.groups.map((g) => [g.group, g]));
     html += `<div class="strip">` + GROUPS.map(([g, title]) => {
@@ -423,7 +428,8 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
       : "Safe range: <b>0.3 – 1.5 ppm</b> free chlorine at the end of the line.";
     const value = g.type === "pressure_logger" ? (g.psi != null ? `${g.psi} psi` : "—") : (g.chlorine != null ? `${g.chlorine} ppm` : "—");
     const pic = g.type === "pressure_logger" ? `<span class="badge" style="width:64px;height:64px;flex:none">${gaugeSvg(g.psi, g.state && g.state !== "notwin" ? g.state : "nodata", COL)}</span>` : "";
-    let html = head(g.name, g.state || "nodata", g.headline, what) + todo(g) +
+    let html = head(g.name, g.state || "nodata", g.headline, what) +
+      (g.twin_id ? `<button class="fpbtn" data-act="gfaceplate" data-uid="${esc(g.uid)}">Open faceplate · trend</button>` : "") + todo(g) +
       `<div class="note" style="display:flex;gap:14px;align-items:center">${pic}<div>Reading: <b style="font-size:15px">${esc(value)}</b><br>` +
       `${esc(age(g.time) || "no reading")}${g.status === "offline" ? " · sensor offline" : ""}<br>${range}</div></div>`;
     if (g.twin_id) {
@@ -535,6 +541,9 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     else if (act === "exitfocus") clearFocus();
     else if (act === "tab") { side.querySelector(".scroll")!.scrollTop = 0; openStation(t.dataset.uid!, false, t.dataset.tab as StationTab); }
     else if (act === "group") { scrollToGroup = t.dataset.g!; openStation(t.dataset.uid!, false, "equipment"); }
+    else if (act === "faceplate") scada.openFaceplate("station", t.dataset.uid!);
+    else if (act === "gfaceplate") scada.openFaceplate("gauge", t.dataset.uid!);
+    else if (act === "trend" && current?.kind === "station") scada.openFaceplate("station", current.uid, t.dataset.key);
     else if (act === "expand" || act === "collapse") {
       detail.querySelectorAll<HTMLDetailsElement>("details.part").forEach((el) => { el.open = act === "expand"; });
     }
@@ -959,10 +968,26 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
       setView(view);
     }
     rerenderDetail();
+    scada.update();
   }
   map.on("load", () => { if (lastLive) renderAll(); });
 
+  // ---------------------------------------------------------------- SCADA: alarm console, status grid, faceplates
+  const scada = startScada({
+    root, stations: () => stations, gauges: () => gauges, labels: LBL,
+    openStation: (uid) => openStation(uid, true), openGauge: (uid) => openGauge(uid, true),
+    openPipeOf: (id) => { const p = pipes.features.find((x) => x.properties.twin_id === id); if (p) openPipe(p.properties.uid); },
+    onLayout: () => map.resize(),
+  });
+  // the stage changes size with the alarm console: the map follows
+  const ro = new ResizeObserver(() => map.resize());
+  ro.observe(mapEl);
+
   const es = new EventSource("/api/status/stream");
+  es.addEventListener("alarms", (e) => {
+    const { alarms } = JSON.parse((e as MessageEvent<string>).data) as { alarms: Alarm[] };
+    scada.setAlarms(alarms);
+  });
   es.addEventListener("status", (e) => {
     const { status } = JSON.parse((e as MessageEvent<string>).data) as { status: LiveResponse };
     applyLive(status);
@@ -986,6 +1011,8 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
   return () => {
     es.close();
     clearInterval(tick);
+    scada.stop();
+    ro.disconnect();
     detail.removeEventListener("click", onDetailClick);
     detail.removeEventListener("toggle", onToggle, true);
     for (const t of toastTimers) clearTimeout(t);

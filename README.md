@@ -90,6 +90,26 @@ cards, the attention list and an open detail panel update in place. The badge sa
 checked hh:mm:ss · latest reading …". If the twin can't be read the page keeps the last status and says "Twin
 unreachable"; `GET /api/status` answers 502 (details in the server log only).
 
+## SCADA screens (ISA-101 high-performance style)
+
+Grey for everything normal; colour only for abnormal states, always with a priority shape and number
+(1 high: red square, 2 medium: amber triangle, 3 low: blue diamond). `src/components/monitor/scada.ts`, `src/app/scada.css`.
+
+* **Alarm console** (bottom): one list on the server for every operator (`src/lib/scada/alarms.ts`, ISA-18.2 states).
+  A problem is raised unacknowledged (its priority flashes); "Ack" / "Acknowledge all" (`POST /api/alarms/ack`)
+  acknowledges it for everyone. When the problem clears, an acknowledged alarm leaves the list and an unacknowledged
+  one stays as "Returned to normal" until acknowledged. Not working = priority 1, needs attention = 2, no data = 3.
+  The list is sent on the status stream (`event: alarms`) and kept in memory (a restart raises current problems again).
+* **Status grid** (top bar): every station's key values and every DPP / chlorine point on one screen, with analog
+  indicators (the normal range lighter, a pointer for the value).
+* **Faceplate**: a station's P&ID (well and pump, VFD, chlorination, inlet valve, storage tank, outlet valve and
+  instruments, power: grid, generator, transfer switch) with live values; running / open is filled, stopped / closed
+  hollow. Click any instrument or reading for its **trend** (1 h – 7 d, limit lines, crosshair, table view).
+* **Trends**: the twin only holds the latest value, so the server samples every numeric reading each time it reads the
+  twin (a steady value once a minute; an offline sensor as a gap), keeps 7 days and saves to `.scada/history.json`
+  (`SCADA_DATA_DIR` to move it). `GET /api/history?id=<twin id>&prop=<property>&hours=<n>`. History builds up while the
+  monitor is open; a fresh server starts with none.
+
 ## Status rules (mirror the QGIS plugin)
 
 * **States**, worst first: Not working (red square), Needs attention (amber triangle), No current data (grey dashed

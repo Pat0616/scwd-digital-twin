@@ -2,6 +2,8 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { loadStatusGis } from "@/lib/gis/load";
 import { computeMonitor } from "@/lib/monitor/status";
+import { syncAlarms } from "@/lib/scada/alarms";
+import { recordHistory } from "@/lib/scada/history";
 import { getTwinGraph } from "@/lib/twin/source";
 import type { TwinGraph } from "@/lib/twin/types";
 import { TwinIndex, computeStatus, type StatusGis } from "./compute";
@@ -54,6 +56,8 @@ export async function liveStatus(): Promise<LiveStatus> {
     const base = computeStatus(graph, gis, kind, fetchedAt, now);
     const body: LiveResponse = { ...base, label, shifted, monitor: computeMonitor(new TwinIndex(graph), gis, base, now) };
     stampSince(body, gis, fetchedAt);
+    recordHistory(body, fetchedAt);                    // the SCADA trends
+    syncAlarms(body, gis, fetchedAt);                  // the SCADA alarm list
     // moved reading times change the status without any twin changing (its $etag): send it again once a minute
     const minute = shifted ? `-${Math.floor(Date.now() / 60_000)}` : "";
     last = { version: graphVersion(graph) + minute, fetchedAt, body };

@@ -96,10 +96,19 @@ export default function MonitorApp() {
             <div id="detail" />
           </div>
         </aside>
-        <div id="map">
-          <div className="legend" id="legend" />
-          <div className="toasts" id="toasts" aria-live="polite" />
-        </div>
+        {/* SCADA: the top bar (map / status grid, alarm counts, clock), the stage, and the alarm console */}
+        <main id="main">
+          <div className="mainbar" id="mainbar" />
+          <div id="stage">
+            <div id="map">
+              <div className="legend" id="legend" />
+              <div className="toasts" id="toasts" aria-live="polite" />
+            </div>
+            <div id="grid" className="hp" hidden />
+            <div id="faceplate" className="hp" hidden role="dialog" aria-modal="false" aria-label="Station faceplate" />
+          </div>
+          <section id="alarms" className="hp" aria-label="Alarms" />
+        </main>
       </div>
       <div className={`splash ${ready ? "done" : ""}`} aria-hidden={ready}>
         {/* eslint-disable-next-line @next/next/no-img-element -- a fixed brand image on the loading screen */}

@@ -1,3 +1,4 @@
+import { watchAlarms } from "@/lib/scada/alarms";
 import { watchStatus, type WatchEvent } from "@/lib/status/watch";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +9,7 @@ const HEARTBEAT_MS = 20_000;
 /**
  * Server-Sent Events: the map's live status, pushed whenever the twin changes (checked every few seconds).
  * Events: "status" (the full status, on connect and on every change), "checked" (each check, for the badge),
- * "twin-error" (the twin could not be read; the browser keeps what it has).
+ * "twin-error" (the twin could not be read; the browser keeps what it has), "alarms" (the SCADA alarm list).
  */
 export async function GET(req: Request) {
   const enc = new TextEncoder();
@@ -21,10 +22,13 @@ export async function GET(req: Request) {
         if (e.type === "checked") send(`event: checked\ndata: ${JSON.stringify({ fetchedAt: e.fetchedAt })}\n\n`);
         if (e.type === "error") send(`event: twin-error\ndata: {}\n\n`);
       });
+      // the shared SCADA alarm list: now, and whenever it changes (a new problem, one over, an acknowledgement)
+      const unwatchAlarms = watchAlarms((alarms) => send(`event: alarms\ndata: ${JSON.stringify({ alarms })}\n\n`));
       const beat = setInterval(() => send(`: keep-alive\n\n`), HEARTBEAT_MS);
       stop = () => {
         clearInterval(beat);
         unsubscribe();
+        unwatchAlarms();
         try { controller.close(); } catch { /* already closed */ }
       };
       req.signal.addEventListener("abort", () => stop());

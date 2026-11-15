@@ -43,3 +43,6 @@ next-env.d.ts
 
 # your own edited copies of the twin graph
 data/*.local.json
+
+# SCADA reading history (trends), written by the server
+.scada/

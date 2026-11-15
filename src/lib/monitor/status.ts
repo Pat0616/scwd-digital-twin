@@ -303,6 +303,8 @@ export interface StationLive {
   affects: string | null;
   /** filled in by lib/status/live.ts: when this state and headline were first seen */
   since: string | null;
+  /** every problem with its own state and group, worst first (the SCADA alarm list) */
+  alarms: { state: MonState; text: string; group: MonGroup | null }[];
 }
 
 export interface GaugeLive {
@@ -379,6 +381,7 @@ export function computeMonitor(idx: TwinIndex, gis: StatusGis, base: StatusRespo
       action: isBad ? advice(st.issues[0]!.text) : null,
       affects: isBad && affects.length ? affects.join(", ") : null,
       since: null,
+      alarms: st.issues.map((i) => ({ state: i.state, text: i.text, group: i.group })),
     };
     stationStates.push(st.state);
     if (st.state === "down" || st.state === "attention")
