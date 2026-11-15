@@ -74,6 +74,19 @@ describe("alarm list (ISA-18.2 states)", () => {
   });
 });
 
+describe("trend figures", () => {
+  it("averages over time (the value held until the next sample), skipping offline gaps", async () => {
+    const { trendStats } = await import("@/components/monitor/scada");
+    // 10 for 1 h, offline for 1 h, 40 for 2 h, inside a 4 h window
+    const h = 3.6e6;
+    const s = trendStats({ t: [0, h, 2 * h], v: [10, null, 40] }, 0, 4 * h);
+    expect(s).toMatchObject({ now: 40, min: 10, max: 40, n: 3 });
+    expect(s.avg).toBeCloseTo((10 * 1 + 40 * 2) / 3);
+    // a sample from before the window counts from the window's start
+    expect(trendStats({ t: [-h, h], v: [5, 15] }, 0, 2 * h)).toMatchObject({ min: 5, max: 15, avg: 10, n: 1 });
+  });
+});
+
 describe("reading history (trends)", () => {
   it("stores a steady value at most once a minute, and an offline sensor as a gap", () => {
     const s = live();

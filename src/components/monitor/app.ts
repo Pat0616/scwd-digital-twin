@@ -864,7 +864,9 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     }
     if (k !== "health") html += `<div><span class="badge b">${MON.badges.down}</span>Speech bubble: the part with a problem</div>`;
     html += `<div><span class="ln" style="background:repeating-linear-gradient(90deg,${COL.down} 0 6px,transparent 6px 10px)"></span>Reported pipe problem</div>`;
-    $("#legend").innerHTML = `<button class="lg-toggle" data-lg>${legendClosed ? "Show" : "Hide"}</button>` + (legendClosed ? `<div class="t">LEGEND</div>` : "") + `<div class="lg-body">${html}</div>`;
+    $("#legend").innerHTML = legendClosed
+      ? `<button class="lg-pill" data-lg aria-expanded="false">Legend</button>`
+      : `<button class="lg-toggle" data-lg aria-expanded="true">Hide</button><div class="lg-body">${html}</div>`;
     $("#legend").classList.toggle("closed", legendClosed);
   }
 
@@ -978,6 +980,14 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     openStation: (uid) => openStation(uid, true), openGauge: (uid) => openGauge(uid, true),
     openPipeOf: (id) => { const p = pipes.features.find((x) => x.properties.twin_id === id); if (p) openPipe(p.properties.uid); },
     onLayout: () => map.resize(),
+    city: () => city,
+    icon: (k) => {
+      if (k.startsWith("group:")) return (MON.groupIcons as Record<string, string>)[k.slice(6)] ?? "";
+      if (k === "station") return MON.sites.station ?? "";
+      if (k === "gauge-psi") return gaugeSvg(12, "ok", COL);
+      if (k === "gauge-cl") return `<svg viewBox="0 0 24 24"><path d="M12 3 21 12 12 21 3 12z" fill="${COL.ok}" stroke="#fff" stroke-width="1.6"/></svg>`;
+      return `<svg viewBox="0 0 24 24" fill="none" stroke="#9aa3ad" stroke-width="2.2" stroke-linecap="round"><path d="M2 9h6v6H2M22 9h-6v6h6M8 12h8"/></svg>`;
+    },
   });
   // the stage changes size with the alarm console: the map follows
   const ro = new ResizeObserver(() => map.resize());

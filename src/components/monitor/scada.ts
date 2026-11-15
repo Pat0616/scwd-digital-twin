@@ -24,6 +24,10 @@ export interface ScadaHost {
   openPipeOf: (twinId: string) => void;
   /** the stage changed size (the map must be resized) */
   onLayout: () => void;
+  /** the city's one-line state (the top bar's system pill) */
+  city: () => { state: string; text: string };
+  /** an icon (SVG markup): "station", "gauge-psi", "gauge-cl", "pipe" or "group:<equipment group>" */
+  icon: (kind: string) => string;
 }
 
 export interface Scada {
@@ -53,6 +57,44 @@ function clock(t: string | number): string {
   const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   return d.toDateString() === now.toDateString() ? hm : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${hm}`;
 }
+/** "just now", "12 min", "3 h", "2 d" */
+function since(t: string | number): string {
+  const m = (Date.now() - new Date(t).getTime()) / 60_000;
+  return m < 1 ? "just now" : m < 60 ? `${Math.floor(m)} min` : m < 48 * 60 ? `${Math.floor(m / 60)} h` : `${Math.floor(m / 1440)} d`;
+}
+/** localStorage, quietly (private windows, blocked storage) */
+const store = {
+  get: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* not kept */ } },
+};
+const ICON = {
+  map: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3z"/><path d="M9 3v15M15 6v15"/></svg>`,
+  grid: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M9 4v16"/></svg>`,
+  bell: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>`,
+  check: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.7 2.7L16 9.8"/></svg>`,
+  expand: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>`,
+  shrink: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>`,
+  close: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>`,
+  chart: `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/></svg>`,
+};
+
+/** A trend's figures over [t0, now]: the value held between samples (a step), so the average is time-weighted. */
+export function trendStats(d: { t: number[]; v: (number | null)[] }, t0: number, now: number):
+  { now: number | null; min: number | null; max: number | null; avg: number | null; n: number } {
+  let min: number | null = null, max: number | null = null, area = 0, span = 0, n = 0, last: number | null = null;
+  for (let i = 0; i < d.t.length; i++) {
+    const v = d.v[i] ?? null;
+    const a = Math.max(d.t[i]!, t0), b = Math.min(i + 1 < d.t.length ? d.t[i + 1]! : now, now);
+    if (d.t[i]! >= t0) n++;
+    last = v;
+    if (v == null || b <= a) continue;
+    min = min == null ? v : Math.min(min, v);
+    max = max == null ? v : Math.max(max, v);
+    area += v * (b - a);
+    span += b - a;
+  }
+  return { now: last, min, max, avg: span ? area / span : null, n };
+}
 const numOf = (r: CardReading | undefined) => {
   if (!r) return null;
   if (r.pct != null) return r.pct;
@@ -80,50 +122,105 @@ export function startScada(h: ScadaHost): Scada {
   const $ = <T extends HTMLElement = HTMLElement>(sel: string) => h.root.querySelector<T>(sel)!;
   const bar = $("#mainbar"), grid = $("#grid"), face = $("#faceplate"), console_ = $("#alarms");
   let alarms: Alarm[] = [];
+  let received = false;               // the server's list has arrived (until then "no alarms" would be untrue)
   let screen: "map" | "grid" = "map";
-  let filter: "all" | "unack" | "p1" = "all";
+  let filter: "all" | "unack" | "p1" | "p2" | "p3" = "all";
   let collapsed = false;
   let gridAbnormal = false;
   let fp: { kind: "station" | "gauge"; uid: string; trend: string; hours: number; table: boolean } | null = null;
+  let fpExpanded = store.get("scada.fpExpanded") === "1";
+  // the console's height, as the operator last dragged it
+  const savedH = Number(store.get("scada.consoleH"));
+  if (savedH >= 110) console_.style.height = `${savedH}px`;
 
-  // ------------------------------------------------------------ top bar: screens, alarm counts, clock
+  // ------------------------------------------------------------ top bar: screens, system state, alarm counts, clock
   function renderBar() {
     const act = alarms.filter((a) => !a.cleared);
     const unack = alarms.filter((a) => !a.acked).length;
     const by = (p: AlarmPriority) => act.filter((a) => a.priority === p).length;
+    const c = h.city();
+    const cp = STATE_PRI[c.state];
+    const short = c.state === "waiting" ? "Connecting…" : c.state === "ok" ? "All systems normal" : (c.text.split(":")[0] || c.text);
     bar.innerHTML = `<div class="screens" role="tablist">` +
-      ([["map", "Map"], ["grid", "Status grid"]] as const).map(([k, t]) =>
-        `<button role="tab" aria-selected="${screen === k}" class="${screen === k ? "on" : ""}" data-screen="${k}">${t}</button>`).join("") + `</div>` +
-      `<button class="alsum" data-act="focus-alarms" title="Active alarms by priority">` +
-      ([1, 2, 3] as AlarmPriority[]).map((p) => `<span class="${by(p) ? "" : "zero"}">${priShape(p, 15)}<b>${by(p)}</b></span>`).join("") +
-      `<span class="unack ${unack ? "on" : ""}">${unack} unacknowledged</span></button>` +
-      `<span class="clock" id="hp-clock">${clock(Date.now())}</span>`;
+      ([["map", "Map", ICON.map], ["grid", "Status grid", ICON.grid]] as const).map(([k, t, i]) =>
+        `<button role="tab" aria-selected="${screen === k}" class="${screen === k ? "on" : ""}" data-screen="${k}">${i}${t}</button>`).join("") + `</div>` +
+      `<span class="syspill ${cp ? "abn" : ""}" title="${esc(c.text)}">${cp ? priShape(cp, 14) : `<i class="dot"></i>`}${esc(short)}</span>` +
+      `<div class="alsum" role="group" aria-label="Active alarms by priority">` +
+      ([1, 2, 3] as AlarmPriority[]).map((p) => `<button class="pp ${by(p) ? "" : "zero"} ${filter === `p${p}` && !collapsed ? "on" : ""}" data-pri="${p}" ` +
+        `title="Show priority ${p} alarms">${priShape(p, 14)}<b>${by(p)}</b></button>`).join("") +
+      `<button class="pp unack ${unack ? "has" : "zero"}" data-act="focus-alarms" title="Show unacknowledged alarms">${ICON.bell}<b>${unack}</b><span>unack</span></button></div>` +
+      `<span class="clock"><i class="live"></i><span id="hp-clock">${clockLong()}</span></span>`;
   }
+  const clockLong = () => {
+    const d = new Date();
+    return `${d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} · ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
 
   // ------------------------------------------------------------ alarm console
+  function kindIcon(a: Alarm) {
+    if (a.kind === "station") return h.icon("station");
+    if (a.kind === "pipe") return h.icon("pipe");
+    const g = h.gauges().find((x) => x.twin_id === a.source);
+    return h.icon(g?.type === "chlorine_point" ? "gauge-cl" : "gauge-psi");
+  }
   function renderConsole() {
     const unack = alarms.filter((a) => !a.acked).length;
-    const rows = alarms.filter((a) => filter === "all" || (filter === "unack" ? !a.acked : a.priority === 1));
-    const head = `<div class="ac-head"><button class="ac-toggle" data-act="collapse" aria-expanded="${!collapsed}">` +
-      `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4"><path d="${collapsed ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"}"/></svg>ALARMS</button>` +
-      `<span class="ac-count">${alarms.filter((a) => !a.cleared).length} active · ${unack} unacknowledged</span>` +
-      `<div class="ac-filter" role="group" aria-label="Filter alarms">` +
-      ([["all", "All"], ["unack", "Unacknowledged"], ["p1", "Priority 1"]] as const).map(([k, t]) =>
+    const active = alarms.filter((a) => !a.cleared).length;
+    const rows = alarms.filter((a) => filter === "all" || (filter === "unack" ? !a.acked : a.priority === Number(filter.slice(1))));
+    const head = `<div class="ac-grip" data-act="grip" title="Drag to resize" aria-hidden="true"><i></i></div>` +
+      `<div class="ac-head"><button class="ac-toggle" data-act="collapse" aria-expanded="${!collapsed}">` +
+      `<svg class="chev" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6"><path d="${collapsed ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"}"/></svg>` +
+      `${ICON.bell}<span>Alarms</span></button>` +
+      `<span class="ac-chip">${active} active</span><span class="ac-chip ${unack ? "hot" : ""}">${unack} unacknowledged</span>` +
+      `<div class="seg ac-filter" role="group" aria-label="Filter alarms">` +
+      ([["all", "All"], ["unack", "Unacknowledged"], ["p1", "Priority 1"], ["p2", "2"], ["p3", "3"]] as const).map(([k, t]) =>
         `<button class="${filter === k ? "on" : ""}" data-filter="${k}">${t}</button>`).join("") + `</div>` +
-      `<button class="ac-ackall" data-act="ackall" ${unack ? "" : "disabled"}>Acknowledge all</button></div>`;
+      `<button class="btn ac-ackall" data-act="ackall" ${unack ? "" : "disabled"}>Acknowledge all</button></div>`;
     if (collapsed) { console_.innerHTML = head; console_.classList.add("collapsed"); return; }
     console_.classList.remove("collapsed");
-    const body = rows.length ? `<table class="ac-table"><thead><tr><th>Pri</th><th>Raised</th><th>Source</th><th>Alarm</th><th>State</th><th></th></tr></thead><tbody>` +
+    const body = rows.length ? `<table class="ac-table"><thead><tr><th></th><th>Raised</th><th>Source</th><th>Alarm</th><th>State</th><th></th></tr></thead><tbody>` +
       rows.map((a) => {
-        const st = a.cleared ? (a.acked ? "Cleared" : "Returned to normal") : a.acked ? "Acknowledged" : "Unacknowledged";
+        const st = a.cleared ? (a.acked ? "Cleared" : "RTN") : a.acked ? "ACK" : "UNACK";
+        const stTitle = a.cleared ? `Returned to normal at ${clock(a.cleared)}` : a.acked ? `Acknowledged at ${clock(a.acked)}` : "Unacknowledged";
         return `<tr class="${a.acked ? "acked" : "unacked"} ${a.cleared ? "rtn" : ""} p${a.priority}" data-id="${esc(a.id)}">` +
-          `<td>${priShape(a.priority)}</td><td class="tm">${esc(clock(a.raised))}</td><td class="src">${esc(a.name)}</td>` +
-          `<td class="msg">${esc(a.text)}</td><td class="st">${st}${a.cleared ? ` · ${esc(clock(a.cleared))}` : ""}</td>` +
-          `<td>${a.acked ? "" : `<button class="ack" data-ack="${esc(a.id)}">Ack</button>`}</td></tr>`;
+          `<td class="pr">${priShape(a.priority)}</td>` +
+          `<td class="tm"><b>${esc(clock(a.raised))}</b><small>${esc(since(a.raised))} ago</small></td>` +
+          `<td class="src"><div class="srcw"><span class="ki">${kindIcon(a)}</span><span><b>${esc(a.name)}</b><small>${a.kind === "station" ? "Station" : a.kind === "gauge" ? "Gauge" : "Pipe"}</small></span></div></td>` +
+          `<td class="msg">${esc(a.text)}</td>` +
+          `<td><span class="spill ${a.cleared ? "rtn" : a.acked ? "ack" : "unack"}" title="${esc(stTitle)}">${st}</span></td>` +
+          `<td class="act">${a.acked ? "" : `<button class="btn sm ack" data-ack="${esc(a.id)}">Ack</button>`}</td></tr>`;
       }).join("") + `</tbody></table>`
-      : `<div class="ac-empty">${alarms.length ? "No alarms match this filter." : "No alarms. Every station and gauge is normal."}</div>`;
+      : !received ? `<div class="ac-empty">${ICON.bell}<div><b>Waiting for the alarm list</b><span>It arrives with the first status from the digital twin.</span></div></div>`
+      : `<div class="ac-empty">${ICON.check}<div><b>${alarms.length ? "No alarms match this filter" : "No alarms"}</b>` +
+        `<span>${alarms.length ? "Choose another filter to see the rest." : "Every station and gauge is normal."}</span></div></div>`;
+    const keep = console_.querySelector(".ac-body")?.scrollTop ?? 0;
     console_.innerHTML = head + `<div class="ac-body">${body}</div>`;
+    console_.querySelector(".ac-body")!.scrollTop = keep;
   }
+  // drag the console's top edge: taller or shorter (110 px to 70% of the main area), remembered
+  let drag: { y: number; h: number } | null = null;
+  let raf = 0;
+  const onGripDown = (e: PointerEvent) => {
+    if (!(e.target as HTMLElement).closest("[data-act=grip]") || collapsed) return;
+    e.preventDefault();
+    drag = { y: e.clientY, h: console_.getBoundingClientRect().height };
+    document.body.classList.add("resizing");
+  };
+  const onGripMove = (e: PointerEvent) => {
+    if (!drag) return;
+    const max = (console_.parentElement?.getBoundingClientRect().height ?? 800) * 0.7;
+    const hh = Math.round(Math.min(max, Math.max(110, drag.h + drag.y - e.clientY)));
+    console_.style.height = `${hh}px`;
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => h.onLayout());
+  };
+  const onGripUp = () => {
+    if (!drag) return;
+    drag = null;
+    document.body.classList.remove("resizing");
+    store.set("scada.consoleH", String(Math.round(console_.getBoundingClientRect().height)));
+    h.onLayout();
+  };
   async function ack(ids: string[] | "all") {
     try {
       await fetch("/api/alarms/ack", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -152,19 +249,50 @@ export function startScada(h: ScadaHost): Scada {
   }
   function stateCell(st: MonState | null | undefined, standby: boolean): string {
     const p = STATE_PRI[st ?? ""];
-    return `<td class="state ${p ? "abn" : ""}">${p ? priShape(p, 13) : ""}${esc(standby && st === "ok" ? "Standby" : h.labels[st ?? ""] ?? "—")}</td>`;
+    return `<td class="state"><span class="spill ${p ? `abn p${p}` : ""}">${p ? priShape(p, 12) : ""}${esc(standby && st === "ok" ? "Standby" : h.labels[st ?? ""] ?? "—")}</span></td>`;
+  }
+  const isRunning = (f: Facility) => {
+    const rs = readingsOf(f);
+    const run = pick(rs, "run_status"), speed = pick(rs, "speed_hz", "vfd");
+    return run ? /run|on/i.test(run.value) : speed ? (numOf(speed) ?? 0) > 0 : null;
+  };
+  /** The headline tiles over the grid: a big number, its label and one line; a shape only when it is bad. */
+  function kpis(ss: Facility[], dpps: Gauge[]): string {
+    const pumps = ss.map(isRunning).filter((x): x is boolean => x != null);
+    const running = pumps.filter(Boolean).length, standby = ss.filter((f) => f.standby).length;
+    const down = ss.filter((f) => f.state === "down").length;
+    const reporting = dpps.filter((g) => g.psi != null && g.state !== "nodata");
+    const low = reporting.filter((g) => g.psi! < 7), veryLow = low.filter((g) => g.psi! < 3);
+    const lowest = reporting.reduce<Gauge | null>((a, g) => (!a || g.psi! < a.psi! ? g : a), null);
+    const tanks = ss.map((f) => pick(readingsOf(f), "level_pct", "storage")).filter((r): r is Reading => !!r && !r.offline);
+    const tanksLow = tanks.filter((r) => r.alarm);
+    const minTank = tanks.reduce<number | null>((m, r) => { const n = numOf(r); return n == null ? m : m == null ? n : Math.min(m, n); }, null);
+    const act = alarms.filter((a) => !a.cleared);
+    const byP = (p: number) => act.filter((a) => a.priority === p).length;
+    const worstP = ([1, 2, 3] as AlarmPriority[]).find((p) => byP(p));
+    const tile = (big: string, of: string, label: string, sub: string, p: AlarmPriority | null | undefined) =>
+      `<button class="kpi ${p ? `abn p${p}` : ""}" data-act="kpi"><span class="k-l">${p ? priShape(p, 14) : ""}${label}</span>` +
+      `<span class="k-v">${big}<small>${of}</small></span><span class="k-s">${sub}</span></button>`;
+    return `<div class="kpis">` +
+      tile(`${running}`, ` / ${pumps.length}`, "Pumps running", `${standby} on standby${down ? ` · ${down} station${down > 1 ? "s" : ""} not working` : ""}`, down ? 1 : null) +
+      tile(`${low.length}`, ` / ${reporting.length}`, "Pressure points below 7 psi",
+        lowest ? `lowest ${lowest.psi} psi · ${esc(lowest.name)}` : "no readings", veryLow.length ? 1 : low.length ? 2 : null) +
+      tile(`${tanksLow.length}`, ` / ${tanks.length}`, "Storage tanks below minimum", minTank != null ? `lowest level ${minTank}%` : "no readings", tanksLow.length ? 2 : null) +
+      tile(`${act.length}`, "", "Active alarms", `P1 ${byP(1)} · P2 ${byP(2)} · P3 ${byP(3)}`, worstP) + `</div>`;
   }
   function renderGrid() {
     if (screen !== "grid") return;
     const ss = h.stations().filter((f) => f.twin_id).sort((a, b) => a.name.localeCompare(b.name));
     const shown = gridAbnormal ? ss.filter((f) => f.state && f.state !== "ok") : ss;
     const gs = h.gauges().filter((g) => g.twin_id);
-    const dpps = gs.filter((g) => g.type === "pressure_logger").filter((g) => !gridAbnormal || (g.state && g.state !== "ok")).sort((a, b) => a.name.localeCompare(b.name));
+    const allDpps = gs.filter((g) => g.type === "pressure_logger");
+    const dpps = allDpps.filter((g) => !gridAbnormal || (g.state && g.state !== "ok")).sort((a, b) => a.name.localeCompare(b.name));
     const chl = gs.filter((g) => g.type === "chlorine_point").filter((g) => !gridAbnormal || (g.state && g.state !== "ok")).sort((a, b) => a.name.localeCompare(b.name));
-    let html = `<div class="g-tools"><label><input type="checkbox" data-act="abn" ${gridAbnormal ? "checked" : ""}> Abnormal only</label>` +
-      `<span class="g-note">Grey is normal. A shape and number mark anything abnormal (1 high, 2 medium, 3 low). Click a row for its faceplate, a value for its trend.</span></div>`;
-    html += `<h3>Pumping stations and bulk supply <span>${shown.length}</span></h3><div class="g-scroll"><table class="g-table"><thead><tr>` +
-      `<th>Station</th><th>State</th><th>Pump</th><th>VFD Hz</th><th>Tank %</th><th></th><th>Outlet psi</th><th>Outlet L/s</th><th>Cl₂ ppm</th><th>Power</th><th>Gen fuel %</th><th>Alarms</th></tr></thead><tbody>` +
+    let html = kpis(ss, allDpps) + `<div class="g-tools"><label class="switch"><input type="checkbox" data-act="abn" ${gridAbnormal ? "checked" : ""}><i></i>Abnormal only</label>` +
+      `<span class="g-note">Grey is normal; a shape and number mark anything abnormal. Click a row for its faceplate, a value for its trend.</span></div>`;
+    html += `<section class="card"><header class="card-h">${h.icon("station")}<span>Pumping stations and bulk supply</span><em>${shown.length}</em></header>` +
+      `<div class="g-scroll"><table class="g-table"><thead><tr>` +
+      `<th>Station</th><th>State</th><th>Pump</th><th>VFD Hz</th><th class="div">Tank %</th><th></th><th class="div">Outlet psi</th><th>Outlet L/s</th><th>Cl₂ ppm</th><th class="div">Power</th><th>Gen fuel %</th><th class="div">Issues</th></tr></thead><tbody>` +
       shown.map((f) => {
         const rs = readingsOf(f);
         const speed = pick(rs, "speed_hz", "vfd"), run = pick(rs, "run_status");
@@ -175,10 +303,10 @@ export function startScada(h: ScadaHost): Scada {
         const flow = pick(rs, "flow_lps", "storage") ?? pick(rs, "flow_lps");
         const n = (f.issues || []).length;
         return `<tr data-station="${esc(f.uid)}"><th>${esc(f.name)}</th>${stateCell(f.state, f.standby)}${pump}${cell(speed, 0)}${cell(tank, 0)}` +
-          `<td class="bar">${tank && !tank.offline ? analogBar(tankN, 0, 100, 25, 100, tank.alarm ? 2 : null, 90) : ""}</td>` +
+          `<td class="abcell">${tank && !tank.offline ? analogBar(tankN, 0, 100, 25, 100, tank.alarm ? 2 : null, 90) : ""}</td>` +
           `${cell(pick(rs, "pressure_psi", "storage") ?? pick(rs, "pressure_psi"))}${cell(flow)}${cell(pick(rs, "chlorine_residual_ppm"), 2)}` +
           `${cell(pick(rs, "power_source"))}${cell(pick(rs, "fuel_level_pct"), 0)}<td class="${n ? "abn" : "na"}">${n || "—"}</td></tr>`;
-      }).join("") + `</tbody></table></div>`;
+      }).join("") + `</tbody></table></div></section>`;
     const tile = (g: Gauge, kind: "psi" | "ppm") => {
       const v = kind === "psi" ? g.psi : g.chlorine;
       const p = STATE_PRI[g.state ?? ""] ?? null;
@@ -187,8 +315,10 @@ export function startScada(h: ScadaHost): Scada {
         `<span class="gt-n">${p ? priShape(p, 13) : ""}${esc(g.name)}</span>` +
         `<span class="gt-v">${v != null && g.state !== "nodata" ? `${v}<small> ${kind}</small>` : `<span class="comm">${g.status === "offline" ? "COMM" : "—"}</span>`}</span>${bar}</button>`;
     };
-    html += `<h3>Designated pressure points <span>${dpps.length}</span><em>normal range 7 psi and up</em></h3><div class="g-tiles">${dpps.map((g) => tile(g, "psi")).join("")}</div>`;
-    if (chl.length) html += `<h3>Far-point chlorine <span>${chl.length}</span><em>normal range 0.3 – 1.5 ppm</em></h3><div class="g-tiles">${chl.map((g) => tile(g, "ppm")).join("")}</div>`;
+    html += `<section class="card"><header class="card-h">${h.icon("gauge-psi")}<span>Designated pressure points</span><em>${dpps.length}</em><small>normal 7 psi and up</small></header>` +
+      `<div class="g-tiles">${dpps.map((g) => tile(g, "psi")).join("")}</div></section>`;
+    if (chl.length) html += `<section class="card"><header class="card-h">${h.icon("gauge-cl")}<span>Far-point chlorine</span><em>${chl.length}</em><small>normal 0.3 – 1.5 ppm</small></header>` +
+      `<div class="g-tiles">${chl.map((g) => tile(g, "ppm")).join("")}</div></section>`;
     const keep = grid.scrollTop;
     grid.innerHTML = html;
     grid.scrollTop = keep;
@@ -233,7 +363,6 @@ export function startScada(h: ScadaHost): Scada {
     const level = numOf(tankR);
     const pipe = (d: string, on = flowing) => `<path class="pipe ${on ? "on" : ""}" d="${d}"/>`;
     let s = `<svg class="pid" viewBox="0 0 1000 390" text-anchor="middle" role="img" aria-label="Process schematic of ${esc(f.name)}">`;
-    s += `<line class="ground" x1="20" y1="112" x2="980" y2="112"/>`;
     // ---- source: a well with its submersible pump, or a bulk supply point
     if (bulk) {
       s += `<rect class="equip" x="30" y="122" width="110" height="56" rx="3"/><text class="lbl" x="85" y="146">BULK SUPPLY</text>` +
@@ -274,8 +403,8 @@ export function startScada(h: ScadaHost): Scada {
     s += valve(530, 150, pick(rs, "valve_position_pct_open", "storage", "inlet"), "INLET");
     s += pipe("M543 150 H 600");
     s += `<g class="hot ${tankR?.alarm ? "abn" : ""}" ${tankR ? `data-trend="${esc(keyOf(tankR))}"` : ""}><title>Storage tank${level != null ? `: ${level}%` : ""}</title>` +
-      `<rect class="equip tank" x="600" y="60" width="150" height="220" rx="6"/>` +
-      (level != null && !tankR?.offline ? `<rect class="fill" x="603" y="${63 + 214 * (1 - Math.min(100, level) / 100)}" width="144" height="${214 * Math.min(100, level) / 100}" rx="3"/>` : "") +
+      `<path class="equip tank" d="M600 84 Q600 60 675 60 Q750 60 750 84 V272 Q750 280 742 280 H608 Q600 280 600 272 Z"/>` +
+      (level != null && !tankR?.offline ? `<rect class="fill" x="603" y="${86 + 191 * (1 - Math.min(100, level) / 100)}" width="144" height="${191 * Math.min(100, level) / 100}" rx="4"/>` : "") +
       `<text class="lbl" x="675" y="52">STORAGE TANK</text>` +
       `<rect class="vbox" x="635" y="150" width="80" height="26" rx="2"/><text class="val big" x="675" y="169">${tankR ? (tankR.offline ? "COMM" : `${level ?? "—"} %`) : "—"}</text>` +
       `</g>` + flag(756, 52, G.get("storage"));
@@ -307,7 +436,7 @@ export function startScada(h: ScadaHost): Scada {
     }
     s += `</svg>`;
     return s + `<div class="pid-key"><span><i class="k-on"></i>Running / open</span><span><i class="k-off"></i>Stopped / closed</span>` +
-      `<span>${priShape(1, 13)}${priShape(2, 13)}${priShape(3, 13)} Alarm priority</span><span>Click an instrument for its trend</span></div>`;
+      `<span>${priShape(1, 13)}${priShape(2, 13)}${priShape(3, 13)} Alarm priority</span><span class="hint">Click an instrument for its trend</span></div>`;
   }
 
   // ---- trends
@@ -333,7 +462,7 @@ export function startScada(h: ScadaHost): Scada {
     return out;
   }
   function trendSvg(d: History, hours: number, limits: { lo: number | null; hi: number | null }, unit: string): { svg: string; y: (v: number) => number } {
-    const W = 860, H = 230, L = 46, R = 14, T = 14, B = 26;
+    const W = 860, H = 236, L = 46, R = 14, T = 22, B = 26;
     const now = Date.now(), t0 = now - hours * 3.6e6;
     const vals = d.v.filter((v): v is number => v != null);
     const yl = [...vals, ...(limits.lo != null ? [limits.lo] : []), ...(limits.hi != null ? [limits.hi] : [])];
@@ -355,16 +484,27 @@ export function startScada(h: ScadaHost): Scada {
     const lim = (v: number | null, name: string) => v == null || v < lo || v > hi ? "" :
       `<line class="limit" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="limit-t" x="${W - R - 4}" y="${y(v) - 5}" text-anchor="end">${name} ${v} ${esc(unit)}</text>`;
     s += lim(limits.lo, "Low limit") + lim(limits.hi, "High limit");
-    // the line, broken where the sensor was offline; each value held until the next sample (a step)
-    let path = "", pen = false;
+    s += unit ? `<text class="axis unit" x="${L - 6}" y="${T - 2}" text-anchor="end">${esc(unit)}</text>` : "";
+    // the line, broken where the sensor was offline; each value held until the next sample (a step); a soft area
+    // under each unbroken run
+    const base = y(lo).toFixed(1);
+    let path = "", area = "", seg = "", segX0 = 0, pen = false, lastPt: [number, number] | null = null;
+    const close = () => { if (seg) area += `${seg}V${base}H${segX0.toFixed(1)}Z`; seg = ""; };
     for (let i = 0; i < d.t.length; i++) {
       const v = d.v[i], t = Math.max(d.t[i]!, t0);
-      if (v == null) { pen = false; continue; }
-      if (!pen) { path += `M${x(t).toFixed(1)} ${y(v).toFixed(1)}`; pen = true; }
-      else path += `H${x(t).toFixed(1)}V${y(v).toFixed(1)}`;
-      if (i === d.t.length - 1) path += `H${x(now).toFixed(1)}`;
+      // a gap: the line stops where the sensor went offline
+      if (v == null) { if (pen) { path += `H${x(t).toFixed(1)}`; seg += `H${x(t).toFixed(1)}`; } pen = false; close(); continue; }
+      const px = x(t).toFixed(1), py = y(v).toFixed(1);
+      if (!pen) { path += `M${px} ${py}`; seg = `M${px} ${py}`; segX0 = x(t); pen = true; }
+      else { path += `H${px}V${py}`; seg += `H${px}V${py}`; }
+      if (i === d.t.length - 1) { path += `H${x(now).toFixed(1)}`; seg += `H${x(now).toFixed(1)}`; lastPt = [x(now), y(v)]; }
     }
-    s += `<path class="line" d="${path}"/>`;
+    close();
+    s += `<path class="area" d="${area}"/><path class="line" d="${path}"/>`;
+    const lastV = d.v.at(-1);
+    if (lastPt && lastV != null)
+      s += `<circle class="end" cx="${lastPt[0]}" cy="${lastPt[1]}" r="4"/>` +
+        `<text class="end-t" x="${lastPt[0] - 8}" y="${lastPt[1] - 9}" text-anchor="end">${lastV} ${esc(unit)}</text>`;
     s += `<line class="cross" x1="0" x2="0" y1="${T}" y2="${H - B}" style="display:none"/><circle class="cross-dot" r="4" style="display:none"/>`;
     s += `<rect class="hit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}"/></svg>`;
     return { svg: s, y };
@@ -377,21 +517,29 @@ export function startScada(h: ScadaHost): Scada {
     const info = trendInfo(key);
     const d = key ? await loadHistory(key, hours) : null;
     if (!fp || fp.trend !== key || fp.hours !== hours) return;
-    const head = `<div class="tr-head"><b>${esc(info.name)}</b><span>${esc(info.now)}</span><div class="ranges" role="group" aria-label="Time range">` +
+    const head = `<header class="card-h">${ICON.chart.replace('width="26" height="26"', 'width="15" height="15"')}<span>Trend</span><small>${esc(info.name)}</small>` +
+      `<div class="seg ranges" role="group" aria-label="Time range">` +
       ([[1, "1 h"], [8, "8 h"], [24, "24 h"], [168, "7 d"]] as const).map(([hh, t]) => `<button class="${hours === hh ? "on" : ""}" data-hours="${hh}">${t}</button>`).join("") +
-      `</div><button class="linkish" data-act="table">${fp.table ? "Chart" : "Table"}</button></div>`;
+      `</div><button class="btn sm ghost" data-act="table">${fp.table ? "Chart" : "Table"}</button></header>`;
     if (!d || !d.t.length || d.v.every((v) => v == null)) {
-      box.innerHTML = head + `<div class="tr-empty">${d ? "No samples in this time range yet. The server records every reading while the monitor is open (every few seconds, kept 7 days), so the trend fills in from now on." : "The history could not be loaded."}</div>`;
+      box.innerHTML = head + `<div class="tr-empty">${ICON.chart}<div><b>${d ? "No samples in this time range yet" : "The history could not be loaded"}</b>` +
+        `<span>${d ? "The server records every reading while the monitor is open (every few seconds, kept 7 days), so the trend fills in from now on." : "It will try again with the next update."}</span></div></div>`;
       return;
     }
+    const nowMs = Date.now();
+    const st = trendStats(d, nowMs - hours * 3.6e6, nowMs);
+    const fmt = (v: number | null) => (v == null ? "—" : `${Number(v.toFixed(2))}`);
+    const stats = `<div class="tr-stats">` + ([["Now", st.now == null ? (info.now.includes("offline") ? "COMM" : "—") : fmt(st.now)], ["Min", fmt(st.min)],
+      ["Max", fmt(st.max)], ["Average", fmt(st.avg)], ["Samples", `${st.n}`]] as const)
+      .map(([k, v], i) => `<div><span>${k}</span><b>${v}${i < 4 && v !== "—" && v !== "COMM" ? `<small> ${esc(info.unit)}</small>` : ""}</b></div>`).join("") + `</div>`;
     if (fp.table) {
       const rows = d.t.map((t, i) => [t, d.v[i]] as const).filter(([t]) => t >= Date.now() - hours * 3.6e6).reverse().slice(0, 200);
-      box.innerHTML = head + `<div class="tr-table"><table><thead><tr><th>Time</th><th>Value</th></tr></thead><tbody>` +
+      box.innerHTML = head + stats + `<div class="tr-table"><table><thead><tr><th>Time</th><th>Value</th></tr></thead><tbody>` +
         rows.map(([t, v]) => `<tr><td>${esc(clock(t))}</td><td>${v == null ? "offline" : `${v} ${esc(info.unit)}`}</td></tr>`).join("") + `</tbody></table></div>`;
       return;
     }
     const chart = trendSvg(d, hours, info.limits, info.unit);
-    box.innerHTML = head + `<div class="tr-plot">${chart.svg}<div class="tip" hidden></div></div>`;
+    box.innerHTML = head + stats + `<div class="tr-plot">${chart.svg}<div class="tip" hidden></div></div>`;
     const svg = box.querySelector<SVGSVGElement>("svg.trend")!, tip = box.querySelector<HTMLElement>(".tip")!;
     const cross = svg.querySelector<SVGLineElement>(".cross")!, dot = svg.querySelector<SVGCircleElement>(".cross-dot")!;
     const W = 860, L = 46, R = 14, now = Date.now(), t0 = now - hours * 3.6e6;
@@ -426,22 +574,43 @@ export function startScada(h: ScadaHost): Scada {
     return { name: prop ?? "Reading", now: "", unit: "", limits: { lo: null, hi: null } };
   }
 
+  function fpHead(p: AlarmPriority | null | undefined, title: string, state: string, sub: string): string {
+    return `<div class="fp-head"><span class="fp-pill ${p ? `abn p${p}` : ""}">${p ? priShape(p, 14) : `<i class="dot"></i>`}${esc(state)}</span>` +
+      `<div class="fp-t"><h2>${esc(title)}</h2>${sub ? `<div class="fp-sub">${sub}</div>` : ""}</div>` +
+      `<div class="fp-tools"><button class="icobtn" data-act="fp-expand" title="${fpExpanded ? "Restore" : "Expand to the whole map area"}" aria-label="${fpExpanded ? "Restore" : "Expand"}">${fpExpanded ? ICON.shrink : ICON.expand}</button>` +
+      `<button class="icobtn" data-act="fp-close" title="Close (Esc)" aria-label="Close faceplate">${ICON.close}</button></div></div>`;
+  }
+  const card = (icon: string, title: string, body: string, cls = "", extra = "") =>
+    `<section class="card ${cls}"><header class="card-h">${icon}<span>${title}</span>${extra}</header>${body}</section>`;
+
   function renderFaceplate() {
     if (!fp) { face.hidden = true; return; }
-    const close = `<button class="fp-close" data-act="fp-close" aria-label="Close faceplate">×</button>`;
+    face.classList.toggle("expanded", fpExpanded);
     if (fp.kind === "station") {
       const f = h.stations().find((s) => s.uid === fp!.uid);
       if (!f) { fp = null; face.hidden = true; return; }
       const p = STATE_PRI[f.state ?? ""];
-      const rs = readingsOf(f).filter((r) => numOf(r) != null && keyOf(r) && !/^(yes|no)$/.test(r.value));
+      const all = readingsOf(f);
+      const rs = all.filter((r) => numOf(r) != null && keyOf(r) && !/^(yes|no)$/.test(r.value));
       if (!fp.trend && rs.length) fp.trend = keyOf(pick(rs, "level_pct", "storage") ?? pick(rs, "pressure_psi", "storage") ?? rs[0]);
-      face.innerHTML = `<div class="fp-head">${p ? priShape(p, 20) : ""}<div><h2>${esc(f.name)}</h2>` +
-        `<div class="fp-state ${p ? "abn" : ""}">${esc(f.standby && f.state === "ok" ? "Standby" : f.headline || h.labels[f.state ?? ""] || "")}</div></div>${close}</div>` +
-        `<div class="fp-body">${mimic(f)}` +
-        `<div class="fp-chips" role="group" aria-label="Readings to trend">` + rs.map((r) => {
-          const k = keyOf(r);
-          return `<button class="${k === fp!.trend ? "on" : ""} ${r.alarm || r.offline ? "abn" : ""}" data-trend="${esc(k)}">${esc(r.name ?? r.property)}<b>${esc(r.offline ? "COMM" : r.value)}</b></button>`;
-        }).join("") + `</div><div class="fp-trend"></div></div>`;
+      const state = f.standby && f.state === "ok" ? "Standby" : h.labels[f.state ?? ""] ?? "—";
+      const sub = [f.barangay ? `${esc(f.barangay)}, Sorsogon City` : "", f.state !== "ok" && f.headline ? `<b>${esc(f.headline)}</b>` : "",
+        f.affects ? `Affects ${esc(f.affects.split(", ").slice(0, 4).join(", "))}` : ""].filter(Boolean).join(" · ");
+      // the readings, by equipment group; a numeric one opens its trend
+      const groups = (f.groups || []).filter((g) => g.all.length).map((g) => {
+        const gp = STATE_PRI[g.state];
+        return `<div class="rg ${gp ? "abn" : ""}"><div class="rg-h"><span class="chip">${h.icon(`group:${g.group}`)}</span><b>${esc(g.title)}</b>${gp ? priShape(gp, 13) : ""}</div>` +
+          `<div class="rg-list">` + g.all.map((r) => {
+            const k = keyOf(r), trendable = rs.some((x) => keyOf(x) === k);
+            const abn = r.alarm || r.offline;
+            return `<button class="rd ${k === fp!.trend ? "on" : ""} ${abn ? "abn" : ""}" ${trendable ? `data-trend="${esc(k)}"` : "disabled"} title="${esc(r.alarm || r.name || "")}">` +
+              `<span>${abn ? priShape(r.offline ? 3 : 2, 12) : ""}${esc(r.name ?? r.property)}</span><b>${esc(r.offline ? "COMM" : r.value)}</b></button>`;
+          }).join("") + `</div></div>`;
+      }).join("");
+      face.innerHTML = fpHead(p, f.name, state, sub) + `<div class="fp-body">` +
+        card(h.icon("station"), "Process", mimic(f), "fp-process") +
+        card(ICON.grid, "Readings", `<div class="rgs">${groups || `<div class="muted">No live readings.</div>`}</div>`, "fp-readings", `<small>click one for its trend</small>`) +
+        `<section class="card fp-trend"></section></div>`;
     } else {
       const g = h.gauges().find((x) => x.uid === fp!.uid);
       if (!g) { fp = null; face.hidden = true; return; }
@@ -449,12 +618,13 @@ export function startScada(h: ScadaHost): Scada {
       const psi = g.type === "pressure_logger";
       if (!fp.trend && g.twin_id) fp.trend = `${g.twin_id}|${psi ? "pressure_psi" : "chlorine_residual_ppm"}`;
       const v = psi ? g.psi : g.chlorine;
-      face.innerHTML = `<div class="fp-head">${p ? priShape(p, 20) : ""}<div><h2>${esc(g.name)}</h2>` +
-        `<div class="fp-state ${p ? "abn" : ""}">${esc(g.headline || "")}</div></div>${close}</div>` +
-        `<div class="fp-body"><div class="fp-gauge"><div class="fg-v">${v != null && g.state !== "nodata" ? `${v}<small> ${psi ? "psi" : "ppm"}</small>` : `<span class="comm">${g.status === "offline" ? "COMM" : "—"}</span>`}</div>` +
-        (psi ? analogBar(v, 0, 60, 7, 60, p, 360) + `<div class="fg-scale"><span>0</span><span>normal: 7 psi and up</span><span>60 psi</span></div>`
-          : analogBar(v, 0, 2, 0.3, 1.5, p, 360) + `<div class="fg-scale"><span>0</span><span>normal: 0.3 – 1.5 ppm</span><span>2 ppm</span></div>`) +
-        `</div><div class="fp-trend"></div></div>`;
+      const reading = `<div class="fp-gauge"><div class="fg-v">${v != null && g.state !== "nodata" ? `${v}<small> ${psi ? "psi" : "ppm"}</small>` : `<span class="comm">${g.status === "offline" ? "COMM" : "—"}</span>`}</div>` +
+        `<div class="fg-bar">` + (psi ? analogBar(v, 0, 60, 7, 60, p, 420) + `<div class="fg-scale"><span>0</span><span>normal: 7 psi and up</span><span>60 psi</span></div>`
+          : analogBar(v, 0, 2, 0.3, 1.5, p, 420) + `<div class="fg-scale"><span>0</span><span>normal: 0.3 – 1.5 ppm</span><span>2 ppm</span></div>`) + `</div>` +
+        `<div class="fg-txt">${esc(g.headline || "")}${g.action ? `<span>→ ${esc(g.action)}</span>` : ""}</div></div>`;
+      face.innerHTML = fpHead(p, g.name, h.labels[g.state ?? ""] ?? "—", `${psi ? "Designated pressure point" : "Far-point chlorine check"}${g.affects ? ` · Affects ${esc(g.affects)}` : ""}`) +
+        `<div class="fp-body">` + card(h.icon(psi ? "gauge-psi" : "gauge-cl"), psi ? "Water pressure" : "Chlorine residual", reading) +
+        `<section class="card fp-trend"></section></div>`;
     }
     face.hidden = false;
     void renderTrend();
@@ -465,30 +635,37 @@ export function startScada(h: ScadaHost): Scada {
   }
 
   // ------------------------------------------------------------ events
+  const showConsole = (f: typeof filter) => {
+    const wasCollapsed = collapsed;
+    collapsed = false; filter = f;
+    renderConsole(); renderBar();
+    if (wasCollapsed) h.onLayout();
+  };
   const onBar = (e: MouseEvent) => {
-    const t = (e.target as HTMLElement).closest<HTMLElement>("[data-screen],[data-act]");
+    const t = (e.target as HTMLElement).closest<HTMLElement>("[data-screen],[data-act],[data-pri]");
     if (!t) return;
     if (t.dataset.screen) {
       screen = t.dataset.screen as "map" | "grid";
       grid.hidden = screen !== "grid";
       renderBar(); renderGrid();
-    } else if (t.dataset.act === "focus-alarms") {
-      collapsed = false; filter = "unack"; renderConsole(); h.onLayout();
-    }
+    } else if (t.dataset.pri) showConsole(filter === `p${t.dataset.pri}` ? "all" : (`p${t.dataset.pri}` as typeof filter));
+    else if (t.dataset.act === "focus-alarms") showConsole(filter === "unack" ? "all" : "unack");
   };
   const onConsole = (e: MouseEvent) => {
     const t = e.target as HTMLElement;
     const b = t.closest<HTMLElement>("[data-ack],[data-act],[data-filter]");
     if (b?.dataset.ack) { e.stopPropagation(); void ack([b.dataset.ack]); return; }
     if (b?.dataset.act === "ackall") { void ack("all"); return; }
-    if (b?.dataset.act === "collapse") { collapsed = !collapsed; renderConsole(); h.onLayout(); return; }
-    if (b?.dataset.filter) { filter = b.dataset.filter as typeof filter; renderConsole(); return; }
+    if (b?.dataset.act === "grip") return;
+    if (b?.dataset.act === "collapse") { collapsed = !collapsed; renderConsole(); renderBar(); h.onLayout(); return; }
+    if (b?.dataset.filter) { filter = b.dataset.filter as typeof filter; renderConsole(); renderBar(); return; }
     const row = t.closest<HTMLElement>("tr[data-id]");
     const a = row && alarms.find((x) => x.id === row.dataset.id);
     if (a) openSource(a);
   };
   const onGrid = (e: MouseEvent) => {
     const t = e.target as HTMLElement;
+    if (t.closest("[data-act=kpi]")) { gridAbnormal = true; renderGrid(); return; }
     const v = t.closest<HTMLElement>("td[data-trend]");
     const row = t.closest<HTMLElement>("tr[data-station]");
     if (row) {
@@ -509,12 +686,21 @@ export function startScada(h: ScadaHost): Scada {
     if (!t || !fp) return;
     const ds = (t as HTMLElement).dataset;
     if (ds.act === "fp-close") { fp = null; face.hidden = true; return; }
+    if (ds.act === "fp-expand") {
+      fpExpanded = !fpExpanded;
+      store.set("scada.fpExpanded", fpExpanded ? "1" : "0");
+      face.classList.toggle("expanded", fpExpanded);
+      const b = face.querySelector<HTMLElement>("[data-act=fp-expand]");
+      if (b) { b.innerHTML = fpExpanded ? ICON.shrink : ICON.expand; b.title = fpExpanded ? "Restore" : "Expand to the whole map area"; }
+      return;
+    }
     if (ds.act === "table") { fp.table = !fp.table; void renderTrend(); return; }
     if (ds.hours) { fp.hours = Number(ds.hours); void renderTrend(); return; }
     if (ds.trend) {
       fp.trend = ds.trend;
-      face.querySelectorAll<HTMLElement>(".fp-chips button").forEach((b) => b.classList.toggle("on", b.dataset.trend === ds.trend));
+      face.querySelectorAll<HTMLElement>(".rd[data-trend]").forEach((b) => b.classList.toggle("on", b.dataset.trend === ds.trend));
       void renderTrend();
+      face.querySelector(".fp-trend")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
   };
   const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && fp) { fp = null; face.hidden = true; } };
@@ -524,7 +710,12 @@ export function startScada(h: ScadaHost): Scada {
   grid.addEventListener("change", onGridChange);
   face.addEventListener("click", onFace);
   document.addEventListener("keydown", onKey);
-  const clockTimer = setInterval(() => { const c = h.root.querySelector("#hp-clock"); if (c) c.textContent = clock(Date.now()); }, 1000);
+  console_.addEventListener("pointerdown", onGripDown);
+  document.addEventListener("pointermove", onGripMove);
+  document.addEventListener("pointerup", onGripUp);
+  const clockTimer = setInterval(() => { const c = h.root.querySelector("#hp-clock"); if (c) c.textContent = clockLong(); }, 1000);
+  // relative ages in the console ("12 min ago") move on
+  const ageTimer = setInterval(() => { if (!collapsed && !drag) renderConsole(); }, 60_000);
   const trendTimer = setInterval(() => { if (fp && !document.hidden) { histCache.clear(); void renderTrend(); } }, 30_000);
 
   renderBar();
@@ -532,6 +723,7 @@ export function startScada(h: ScadaHost): Scada {
 
   return {
     update() {
+      renderBar();
       renderGrid();
       if (fp) {
         // keep the trend chart as it is (no flicker): redraw only the schematic and the header
@@ -544,8 +736,10 @@ export function startScada(h: ScadaHost): Scada {
     },
     setAlarms(list) {
       alarms = list;
+      received = true;
       renderBar();
       renderConsole();
+      renderGrid();                       // the KPI strip counts alarms
     },
     openFaceplate,
     stop() {
@@ -555,6 +749,11 @@ export function startScada(h: ScadaHost): Scada {
       grid.removeEventListener("change", onGridChange);
       face.removeEventListener("click", onFace);
       document.removeEventListener("keydown", onKey);
+      console_.removeEventListener("pointerdown", onGripDown);
+      document.removeEventListener("pointermove", onGripMove);
+      document.removeEventListener("pointerup", onGripUp);
+      clearInterval(ageTimer);
+      cancelAnimationFrame(raf);
       clearInterval(clockTimer);
       clearInterval(trendTimer);
     },

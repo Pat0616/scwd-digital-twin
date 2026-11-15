@@ -109,10 +109,11 @@ export function alarmList(): Alarm[] {
   return [...st.alarms.values()].sort((a, b) => rank(a) - rank(b) || a.priority - b.priority || b.raised.localeCompare(a.raised));
 }
 
-/** Calls `l` with the list now and on every change. */
+/** Calls `l` with the list now (once there is one: before the first look at the twin an empty list would say "no
+ * alarms" untruly) and on every change. */
 export function watchAlarms(l: (list: Alarm[]) => void): () => void {
   st.listeners.add(l);
-  l(alarmList());
+  if (st.version > 0) l(alarmList());
   return () => { st.listeners.delete(l); };
 }
 
