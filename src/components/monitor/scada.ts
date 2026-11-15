@@ -355,6 +355,9 @@ export function startScada(h: ScadaHost): Scada {
     const rs = readingsOf(f);
     const G = new Map((f.groups || []).map((g) => [g.group, g.state]));
     const speed = pick(rs, "speed_hz", "vfd"), current = pick(rs, "current_a", "vfd"), fault = pick(rs, "fault_code", "vfd");
+    // the twin keeps the supply voltage and the motor current on the VFD; the schematic shows them on a control panel
+    // ahead of it (a panel's voltmeter and ammeter), as a station is wired: ATS -> control panel -> VFD -> pump
+    const volts = pick(rs, "supply_voltage_v", "vfd") ?? pick(rs, "supply_voltage_v");
     const run = pick(rs, "run_status");
     const running = run ? /run|on/i.test(run.value) : (numOf(speed) ?? 0) > 0;
     const flowing = running || (numOf(pick(rs, "flow_lps", "storage")) ?? 0) > 0;
@@ -378,11 +381,26 @@ export function startScada(h: ScadaHost): Scada {
       s += pipe("M90 266 V 150 H 520");
       // the pump drive, wired to the pump
       if (speed || current || fault) {
-        s += `<line class="elec" x1="109" y1="285" x2="200" y2="285"/>` +
+        s += `<line class="elec ${running ? "on" : ""}" x1="109" y1="285" x2="200" y2="285"/>` +
           `<rect class="equip" x="200" y="252" width="130" height="62" rx="3"/><text class="lbl" x="265" y="269">VFD</text>` +
-          `<g class="hot" ${speed ? `data-trend="${esc(keyOf(speed))}"` : ""}><text class="val" x="232" y="290">${speed ? (speed.offline ? "COMM" : `${numOf(speed) ?? "—"} Hz`) : ""}</text></g>` +
-          `<g class="hot" ${current ? `data-trend="${esc(keyOf(current))}"` : ""}><text class="val" x="297" y="290">${current ? (current.offline ? "COMM" : `${numOf(current) ?? "—"} A`) : ""}</text></g>` +
+          `<g class="hot" ${speed ? `data-trend="${esc(keyOf(speed))}"` : ""}><title>VFD output frequency</title>` +
+          `<text class="val" x="265" y="290">${speed ? (speed.offline ? "COMM" : `${numOf(speed) ?? "—"} Hz`) : ""}</text></g>` +
           `<text class="sub ${fault && !/none|ok|^0$/i.test(fault.value) ? "abn-t" : ""}" x="265" y="307">${fault ? `fault: ${esc(fault.value)}` : ""}</text>` + flag(322, 244, G.get("vfd"));
+      }
+      // the control panel: its voltmeter and ammeter (the VFD twin's supply voltage and current)
+      if (volts || current) {
+        const meter = (x: number, r: Reading | undefined, unit: string, tag: string) => {
+          const abn = r?.alarm || r?.offline;
+          return `<g class="hot ${abn ? "abn" : ""}" ${r ? `data-trend="${esc(keyOf(r))}"` : ""}>` +
+            `<title>${tag === "V" ? "Voltmeter: supply voltage" : "Ammeter: motor current"} (read from the VFD twin)${r?.alarm ? `: ${esc(r.alarm)}` : ""}</title>` +
+            `<circle class="bubble" cx="${x}" cy="279" r="11"/><text class="tag" x="${x}" y="283">${tag}</text>` +
+            `<rect class="vbox ${r?.offline ? "comm" : ""}" x="${x - 30}" y="294" width="60" height="17" rx="2"/>` +
+            `<text class="val sm" x="${x}" y="306">${r ? (r.offline ? "COMM" : `${numOf(r) ?? "—"} ${unit}`) : "—"}</text>` +
+            (abn ? `<g transform="translate(${x + 9} ${265})">${priShape(r?.offline ? 3 : 2, 13)}</g>` : "") + `</g>`;
+        };
+        s += `<line class="elec on" x1="360" y1="270" x2="330" y2="270"/>` +
+          `<rect class="equip" x="360" y="252" width="130" height="62" rx="3"/><text class="lbl" x="425" y="264">CONTROL PANEL</text>` +
+          meter(395, volts, "V", "V") + meter(455, current, "A", "A");
       }
       s += instrument(190, 150, "PT", pick(rs, "pressure_psi", "pumping"), 1, false) + instrument(255, 150, "FT", pick(rs, "flow_lps", "pumping"), 1, false);
     }
@@ -417,17 +435,19 @@ export function startScada(h: ScadaHost): Scada {
     s += `<path class="arrow ${flowing ? "on" : ""}" d="M975 240 L992 250 L975 260 Z"/><text class="lbl" x="992" y="330" text-anchor="end">TO NETWORK</text>` +
       (f.affects ? `<text class="sub" x="992" y="346" text-anchor="end">${esc(f.affects.split(", ").slice(0, 3).join(", "))}</text>` : "");
     // ---- power: grid, generator, transfer switch, to the drive
-    const present = pick(rs, "power_present"), source = pick(rs, "power_source"), fuel = pick(rs, "fuel_level_pct"), volts = pick(rs, "supply_voltage_v");
+    const present = pick(rs, "power_present"), source = pick(rs, "power_source"), fuel = pick(rs, "fuel_level_pct");
     // ---- power, one row under the drive: transfer switch (ATS) <- grid, <- generator; the ATS feeds the drive
     if (present || source || fuel) {
       const onGen = /gen/i.test(source?.value ?? "");
       const Y = 336, Hh = 42;
       s += `<rect class="equip" x="215" y="${Y}" width="100" height="${Hh}" rx="3"/><text class="lbl" x="265" y="${Y + 16}">ATS</text>` +
         `<text class="sub" x="265" y="${Y + 33}">on ${esc(source?.value ?? "—")}</text>`;
-      if (!bulk && (speed || current || fault)) s += `<line class="elec on" x1="265" y1="314" x2="265" y2="${Y}"/>`;
+      // the ATS feeds the control panel (or the drive directly when the station has no panel meters)
+      if (!bulk && (volts || current)) s += `<path class="elec on" d="M265 ${Y} V 325 H 425 V 314"/>`;
+      else if (!bulk && (speed || fault)) s += `<line class="elec on" x1="265" y1="314" x2="265" y2="${Y}"/>`;
       s += `<line class="elec ${onGen ? "" : "on"}" x1="315" y1="${Y + 21}" x2="355" y2="${Y + 21}"/>` +
         `<rect class="equip ${present?.value === "no" ? "abn-box" : ""}" x="355" y="${Y}" width="120" height="${Hh}" rx="3"/><text class="lbl" x="415" y="${Y + 16}">GRID</text>` +
-        `<g class="hot" ${volts ? `data-trend="${esc(keyOf(volts))}"` : ""}><text class="val sm" x="415" y="${Y + 33}">${present ? (present.value === "yes" ? "Power on" : "POWER OFF") : ""}${volts && !volts.offline ? ` · ${numOf(volts)} V` : ""}</text></g>` +
+        `<text class="val sm" x="415" y="${Y + 33}">${present ? (present.value === "yes" ? "Power on" : "POWER OFF") : ""}</text>` +
         flag(467, Y - 9, G.get("grid"));
       s += `<path class="elec ${onGen ? "on" : ""}" d="M560 ${Y + Hh} V ${Y + Hh + 8} H 290 V ${Y + Hh}"/>` +
         `<rect class="equip" x="500" y="${Y}" width="120" height="${Hh}" rx="3"/><text class="lbl" x="560" y="${Y + 16}">GENERATOR</text>` +
