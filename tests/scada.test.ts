@@ -74,6 +74,30 @@ describe("alarm list (ISA-18.2 states)", () => {
   });
 });
 
+describe("storage tank bypass (pumping direct to the network)", () => {
+  beforeEach(() => resetAlarms());
+
+  it("a broken tank while the station delivers water is a bypass, with its own P2 alarm", () => {
+    const s = live((g) => { twin(g, "pumpstation-01-storage").operational = false; });
+    const st = s.monitor.stations["pumpstation-01"]!;
+    expect(st.bypass).toBe("tank-out");
+    expect(st.issues).toContain("Storage tank bypassed: pumping direct to the network");
+    syncAlarms(s, gis(), at(0));
+    expect(alarmList().find((a) => a.source === "pumpstation-01" && a.text.startsWith("Storage tank bypassed"))).toMatchObject({ priority: 2 });
+  });
+
+  it("a closed tank inlet while water still leaves is a bypass", () => {
+    const s = live((g) => { twin(g, "pumpstation-01-inlet-valve").valve_position_pct_open = 0; });
+    expect(s.monitor.stations["pumpstation-01"]!.bypass).toBe("inlet-closed");
+  });
+
+  it("a standby station (inlet closed, no flow) is not on bypass", () => {
+    const s = live();
+    expect(s.monitor.stations["pumpstation-03"]!.bypass).toBeNull();
+    expect(Object.values(s.monitor.stations).every((x) => x.bypass === null)).toBe(true);
+  });
+});
+
 describe("trend figures", () => {
   it("averages over time (the value held until the next sample), skipping offline gaps", async () => {
     const { trendStats } = await import("@/components/monitor/scada");

@@ -282,6 +282,14 @@ body.resizing #map { pointer-events: none; }
 .pid .equip.tank { fill: #1f242a; }
 .pid .equip.abn-box { stroke: var(--hp-text); stroke-width: 3; }
 .pid .fill { fill: var(--hp-fill); }
+/* the tank bypass: a thin dashed line while closed; the live path (a full pipe) when the station pumps around its tank */
+.pid .bypass { fill: none; stroke: var(--hp-pipe); stroke-width: 2; stroke-dasharray: 6 5; stroke-linejoin: round; }
+.pid .bypass-g { cursor: help; }
+.pid .tank.oos, .pid .fill.oos { opacity: .45; }
+.pid .tank-hatch { fill: url(#pid-hatch); stroke: none; pointer-events: none; }
+.pid .hatch { stroke: rgba(255, 255, 255, .14); stroke-width: 3; }
+.pid .oos-tag { fill: #0f1215; stroke: var(--p2); stroke-width: 1.5; }
+.pid .oos-t { font-size: 11px; font-weight: 800; letter-spacing: .8px; fill: var(--p2-text); }
 /* ISA-101: running / open is filled (light on dark), stopped / closed is hollow */
 .pid .pump { fill: var(--hp-sunk); stroke: var(--hp-text); stroke-width: 2; }
 .pid .pump.on { fill: var(--hp-pipe-on); }

@@ -101,6 +101,8 @@ export interface StationMonitor {
   affects: string | null;
   /** when the state last changed */
   since: string | null;
+  /** pumping around the storage tank: the tank is out of service, or its inlet is closed (lib/monitor/status.ts) */
+  bypass?: "tank-out" | "inlet-closed" | null;
 }
 
 export interface Facility extends StationMonitor {

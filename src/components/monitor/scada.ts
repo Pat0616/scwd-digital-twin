@@ -302,8 +302,12 @@ export function startScada(h: ScadaHost): Scada {
         const tankN = numOf(tank);
         const flow = pick(rs, "flow_lps", "storage") ?? pick(rs, "flow_lps");
         const n = (f.issues || []).length;
-        return `<tr data-station="${esc(f.uid)}"><th>${esc(f.name)}</th>${stateCell(f.state, f.standby)}${pump}${cell(speed, 0)}${cell(tank, 0)}` +
-          `<td class="abcell">${tank && !tank.offline ? analogBar(tankN, 0, 100, 25, 100, tank.alarm ? 2 : null, 90) : ""}</td>` +
+        // a station pumping around its tank shows that instead of the tank level
+        const tankCells = f.bypass
+          ? `<td class="v abn" title="Storage tank bypassed (${f.bypass === "tank-out" ? "tank out of service" : "tank inlet closed"}): pumping direct to the network">` +
+            `${priShape(2, 13)}Bypassed</td><td class="abcell"></td>`
+          : `${cell(tank, 0)}<td class="abcell">${tank && !tank.offline ? analogBar(tankN, 0, 100, 25, 100, tank.alarm ? 2 : null, 90) : ""}</td>`;
+        return `<tr data-station="${esc(f.uid)}"><th>${esc(f.name)}</th>${stateCell(f.state, f.standby)}${pump}${cell(speed, 0)}${tankCells}` +
           `${cell(pick(rs, "pressure_psi", "storage") ?? pick(rs, "pressure_psi"))}${cell(flow)}${cell(pick(rs, "chlorine_residual_ppm"), 2)}` +
           `${cell(pick(rs, "power_source"))}${cell(pick(rs, "fuel_level_pct"), 0)}<td class="${n ? "abn" : "na"}">${n || "—"}</td></tr>`;
       }).join("") + `</tbody></table></div></section>`;
@@ -417,17 +421,33 @@ export function startScada(h: ScadaHost): Scada {
         `<text class="val sm" x="445" y="25">${dose ? (dose.offline ? "COMM" : `${numOf(dose)} L/h`) : ""}</text>` +
         `<path class="dose ${dosing ? "on" : ""}" d="M445 60 V 150"/><circle class="inj" cx="445" cy="150" r="4"/>` + flag(468, 22, G.get("treatment"));
     }
+    // ---- the tank bypass: stations have one (the twin does not); drawn closed, and as the live path when the station
+    // pumps around its tank (f.bypass, lib/monitor/status.ts stationBypass)
+    const by = f.bypass ?? null;
+    const tankFlow = flowing && !by;
+    const TANK = "M600 84 Q600 60 675 60 Q750 60 750 84 V272 Q750 280 742 280 H608 Q600 280 600 272 Z";
+    s += `<defs><pattern id="pid-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">` +
+      `<line class="hatch" x1="0" y1="0" x2="0" y2="8"/></pattern></defs>`;
+    s += `<g class="bypass-g ${by ? "on" : ""}"><title>Tank bypass line (not in the digital twin). ` +
+      `Shown open when the storage tank is out of service, or its inlet is closed while water still leaves the station.</title>` +
+      `<path class="${by ? "pipe on" : "bypass"}" d="M500 150 V 22 H 764 V 250"/>` +
+      `<path class="valve ${by ? "on" : ""}" d="M623 12 L649 32 L649 12 L623 32 Z"/>` +
+      `<text class="lbl" x="614" y="15" text-anchor="end">BYPASS</text>` +
+      `<text class="sub ${by ? "abn-t" : ""}" x="614" y="36" text-anchor="end">${by ? "OPEN" : "closed"}</text>` +
+      `<circle class="inj" cx="500" cy="150" r="3.5"/><circle class="inj" cx="764" cy="250" r="3.5"/></g>`;
     // ---- storage: inlet valve, tank with level, outlet valve
     s += valve(530, 150, pick(rs, "valve_position_pct_open", "storage", "inlet"), "INLET");
-    s += pipe("M543 150 H 600");
-    s += `<g class="hot ${tankR?.alarm ? "abn" : ""}" ${tankR ? `data-trend="${esc(keyOf(tankR))}"` : ""}><title>Storage tank${level != null ? `: ${level}%` : ""}</title>` +
-      `<path class="equip tank" d="M600 84 Q600 60 675 60 Q750 60 750 84 V272 Q750 280 742 280 H608 Q600 280 600 272 Z"/>` +
-      (level != null && !tankR?.offline ? `<rect class="fill" x="603" y="${86 + 191 * (1 - Math.min(100, level) / 100)}" width="144" height="${191 * Math.min(100, level) / 100}" rx="4"/>` : "") +
+    s += pipe("M543 150 H 600", tankFlow);
+    s += `<g class="hot ${tankR?.alarm ? "abn" : ""}" ${tankR ? `data-trend="${esc(keyOf(tankR))}"` : ""}><title>Storage tank${level != null ? `: ${level}%` : ""}${by ? " (bypassed)" : ""}</title>` +
+      `<path class="equip tank ${by ? "oos" : ""}" d="${TANK}"/>` +
+      (level != null && !tankR?.offline ? `<rect class="fill ${by ? "oos" : ""}" x="603" y="${86 + 191 * (1 - Math.min(100, level) / 100)}" width="144" height="${191 * Math.min(100, level) / 100}" rx="4"/>` : "") +
+      (by ? `<path class="tank-hatch" d="${TANK}"/>` : "") +
       `<text class="lbl" x="675" y="52">STORAGE TANK</text>` +
       `<rect class="vbox" x="635" y="150" width="80" height="26" rx="2"/><text class="val big" x="675" y="169">${tankR ? (tankR.offline ? "COMM" : `${level ?? "—"} %`) : "—"}</text>` +
-      `</g>` + flag(756, 52, G.get("storage"));
+      (by ? `<rect class="oos-tag" x="611" y="190" width="128" height="22" rx="3"/><text class="oos-t" x="675" y="205">${by === "tank-out" ? "OUT OF SERVICE" : "INLET CLOSED"}</text>` : "") +
+      `</g>` + flag(604, 38, G.get("storage"));
     // the outlet: valve, then pressure, flow and chlorine, values alternating below / above the line
-    s += pipe("M750 250 H 778");
+    s += pipe("M750 250 H 764", tankFlow) + pipe("M764 250 H 778");
     s += valve(791, 250, pick(rs, "valve_position_pct_open", "storage", "outlet"), "OUTLET");
     s += pipe("M804 250 H 975");
     s += instrument(855, 250, "PT", pick(rs, "pressure_psi", "storage"), 1, true) + instrument(908, 250, "FT", pick(rs, "flow_lps", "storage"), 1, false) +

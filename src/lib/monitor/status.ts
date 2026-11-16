@@ -43,6 +43,7 @@ const ADVICE: [string, string][] = [
   ["Pump drive fault", "Reset the pump drive (VFD); if the fault comes back, have the motor and cable checked"],
   ["Pump drive (VFD) not working", "Send a technician to the pump drive (VFD)"],
   ["Pump drive current", "Have the pump motor and drive checked for overload"],
+  ["Storage tank bypassed", "Water goes straight from the pump to the network: watch the outlet pressure and the chlorine residual (less contact time); repair the tank and put it back in service"],
   ["Tank level low", "Watch the tank level; check the pump and the outlet valve"],
   ["Chlorine tank low", "Refill the chlorine tank"],
   ["Bulk supply", "Call Casiguran WD about the bulk supply; tell the barangays fed from it"],
@@ -175,6 +176,36 @@ export interface StationResult {
   data: DataHealth;
   standby: boolean;
   down: boolean;
+  /** water going straight from the pump to the network around the storage tank (see stationBypass) */
+  bypass: Bypass;
+}
+
+/** Why a station is on its tank bypass: the tank is out of service, or its inlet is closed. */
+export type Bypass = "tank-out" | "inlet-closed" | null;
+export const BYPASS_TEXT = "Storage tank bypassed: pumping direct to the network";
+
+/**
+ * Whether a station is pumping around its storage tank. The twin has no bypass line (its flow is fixed as chlorinator
+ * -> inlet valve -> tank -> outlet valve -> outlet), but stations have one and use it when the tank is broken: so a
+ * station is on bypass when its tank is not working, or its tank's inlet is closed, while water still leaves the
+ * station (outlet flow; without an outlet flow reading, the pump running). A standby station (inlet closed, no flow)
+ * is not on bypass. The monitor's own rule: the QGIS plugin does not have it.
+ */
+export function stationBypass(parts: Twin[], sensors: TwinReading[]): Bypass {
+  const tank = parts.find((c) => modelName(c) === "StorageTank");
+  const tankOut = !!tank && partOffline(tank);
+  const online = (s: TwinReading | undefined): s is TwinReading => !!s && s.sensor_online !== false;
+  const inlet = sensors.find((s) => s.twin_model === "InletValve" && s.kind === "valve_position");
+  const inletClosed = online(inlet) && inlet.value_number === 0;
+  if (!tankOut && !inletClosed) return null;
+  const flow = sensors.find((s) => s.twin_model === "OutletPipe" && s.kind === "flow");
+  let delivering: boolean;
+  if (online(flow) && flow.value_number != null) delivering = flow.value_number > 0;
+  else {
+    const speed = sensors.find((s) => s.kind === "speed"), run = sensors.find((s) => s.kind === "run_status");
+    delivering = online(run) && run.value_text != null ? /run|on/i.test(run.value_text) : online(speed) && (speed.value_number ?? 0) > 0;
+  }
+  return delivering ? (tankOut ? "tank-out" : "inlet-closed") : null;
 }
 
 /** Everything about one twin-backed station (monitor_status.station_status). */
@@ -199,6 +230,11 @@ export function stationResult(station: Twin, parts: Twin[], sensors: TwinReading
     issues.push({ state: p[0], text: p[1], group: g });
     if (g && g in groups) groups[g] = worst([groups[g], p[0]])!;
   }
+  const bypass = stationBypass(parts, sensors);
+  if (bypass) {
+    issues.push({ state: "attention", text: BYPASS_TEXT, group: "storage" });
+    groups.storage = worst([groups.storage, "attention"])!;
+  }
   const down = station.operational === false || station.station_status === "down" || groups.pumping === "down";
   let state: MonState = down ? "down" : (worst([...Object.values(groups), orphan]) ?? "ok");
   if (state === "down" && !down) state = "attention";   // a part down but the station still pumping
@@ -218,7 +254,7 @@ export function stationResult(station: Twin, parts: Twin[], sensors: TwinReading
   }
   let headline = ordered[0]?.text ?? (standby ? "On standby" : "All working");
   if (ordered.length > 1) headline += ` (+${ordered.length - 1} more)`;
-  return { state, headline, issues: ordered, groups, data, standby, down };
+  return { state, headline, issues: ordered, groups, data, standby, down, bypass };
 }
 
 /** The parts of a station with a problem, worst first; one whose only problems are sensors not reporting gets the
@@ -305,6 +341,8 @@ export interface StationLive {
   since: string | null;
   /** every problem with its own state and group, worst first (the SCADA alarm list) */
   alarms: { state: MonState; text: string; group: MonGroup | null }[];
+  /** pumping around the storage tank (stationBypass) */
+  bypass: Bypass;
 }
 
 export interface GaugeLive {
@@ -382,6 +420,7 @@ export function computeMonitor(idx: TwinIndex, gis: StatusGis, base: StatusRespo
       affects: isBad && affects.length ? affects.join(", ") : null,
       since: null,
       alarms: st.issues.map((i) => ({ state: i.state, text: i.text, group: i.group })),
+      bypass: st.bypass,
     };
     stationStates.push(st.state);
     if (st.state === "down" || st.state === "attention")
