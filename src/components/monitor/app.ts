@@ -752,9 +752,37 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     mapEl.classList.toggle("z-city", z >= 11 && z < 13);
     mapEl.classList.toggle("z-label", z >= 13.3);
     mapEl.classList.toggle("z-close", z >= 15.2);
-    for (const m of gaugeMarkers) m.el.classList.toggle("hide", z < 11 || !(m.problem || z >= 13.2 || view === MON.views[1]));
+    // zoomed out, the Pressure view keeps every pressure point's dial (the chlorine points only when they have a problem)
+    for (const m of gaugeMarkers) m.el.classList.toggle("hide", z < 11 || !(m.problem || z >= 13.2 || (view === MON.views[1] && m.g.type === "pressure_logger")));
   }
   map.on("zoom", zoomClasses);
+  // labels that would overlap one already placed are hidden (the worst state is placed first); the selected or focused
+  // ones always stay. Their dial or picture stays, and hover / click still give the name.
+  function declutter() {
+    const units: { els: HTMLElement[]; rank: number }[] = [];
+    for (const { el, f } of stationMarkers) {
+      el.classList.remove("dc");
+      const els = [...el.querySelectorAll<HTMLElement>(".lab, .eq")];
+      const keep = el.classList.contains("sel") || el.classList.contains("focus");
+      units.push({ els, rank: keep ? -1 : RANK[f.state ?? ""] ?? 9 });
+    }
+    for (const m of gaugeMarkers) {
+      m.wrap.classList.remove("dc");
+      const lab = m.wrap.querySelector<HTMLElement>(".glab");
+      const keep = m.wrap.classList.contains("sel") || m.wrap.classList.contains("focus");
+      if (lab) units.push({ els: [lab], rank: keep ? -1 : RANK[m.g.state ?? ""] ?? 9 });
+    }
+    units.sort((a, b) => a.rank - b.rank);
+    const placed: DOMRect[] = [];
+    const hits = (r: DOMRect) => placed.some((p) => r.left < p.right && r.right > p.left && r.top < p.bottom && r.bottom > p.top);
+    for (const u of units) {
+      const rects = u.els.map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
+      if (!rects.length) continue;
+      if (u.rank >= 0 && rects.some(hits)) { u.els[0]!.closest(".st, .gw")!.classList.add("dc"); continue; }
+      placed.push(...rects);
+    }
+  }
+  map.on("moveend", declutter);
 
   type GaugeMarker = { el: HTMLElement; wrap: HTMLElement; problem: boolean; g: Gauge; marker: Marker };
   const gaugeMarkers: GaugeMarker[] = [], stationMarkers: { el: HTMLElement; f: Facility; marker: Marker }[] = [];
@@ -801,8 +829,10 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
       el.onclick = (ev) => { ev.stopPropagation(); openGauge(g.uid, false); };
       el.title = [g.name, g.headline || LBL[st] || "", g.action ? `→ ${g.action}` : ""].filter(Boolean).join("\n");
       el.classList.add("gw");
+      const problem = ["down", "attention", "nodata"].includes(st);
+      el.classList.toggle("problem", problem);
       el.dataset.ll = `${g.lon},${g.lat}`;
-      gaugeMarkers.push({ el: box, wrap: el, problem: ["down", "attention", "nodata"].includes(st), g,
+      gaugeMarkers.push({ el: box, wrap: el, problem, g,
         marker: new maplibregl.Marker({ element: el }).setLngLat([g.lon, g.lat]).addTo(map) });
     }
     applyFocusClasses();
@@ -838,11 +868,15 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
       if (!mini && k === "health") { mini = document.createElement("span"); mini.className = "mini"; el.appendChild(mini); }
       if (mini) mini.innerHTML = (MON.badges as Record<string, string>)[st] || MON.badges.nodata;
     }
+    // the Equipment view is left out: Overview's speech bubbles already name each station's broken parts, and the
+    // station faceplate and Status grid show every part (the view list itself comes from the QGIS export)
     const SHORT = ["Overview", "Pressure", "Equipment", "Barangays", "Data"];
-    $("#views").innerHTML = MON.views.map((v, i) => `<button class="${v === view ? "on" : ""}" title="${esc(v.split(" ").slice(1).join(" "))}">${SHORT[i] || esc(v)}</button>`).join("");
-    root.querySelectorAll<HTMLElement>("#views button").forEach((b, i) => b.onclick = () => setView(MON.views[i]!));
+    const shown = MON.views.map((v, i) => ({ v, i })).filter(({ i }) => VIEW_KEYS[i] !== "equipment");
+    $("#views").innerHTML = shown.map(({ v, i }) => `<button class="${v === view ? "on" : ""}" title="${esc(v.split(" ").slice(1).join(" "))}">${SHORT[i] || esc(v)}</button>`).join("");
+    root.querySelectorAll<HTMLElement>("#views button").forEach((b, n) => b.onclick = () => setView(shown[n]!.v));
     legend(k);
     zoomClasses();
+    requestAnimationFrame(declutter);
   }
   let legendClosed = false;
   $("#legend").addEventListener("click", (e) => {
@@ -864,6 +898,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     }
     if (k !== "health") html += `<div><span class="badge b">${MON.badges.down}</span>Speech bubble: the part with a problem</div>`;
     html += `<div><span class="ln" style="background:repeating-linear-gradient(90deg,${COL.down} 0 6px,transparent 6px 10px)"></span>Reported pipe problem</div>`;
+    if (k === "pressure") html += `<div class="lg-hint">Zoomed out, only problems are labelled. Zoom in to see every reading.</div>`;
     $("#legend").innerHTML = legendClosed
       ? `<button class="lg-pill" data-lg aria-expanded="false">Legend</button>`
       : `<button class="lg-toggle" data-lg aria-expanded="true">Hide</button><div class="lg-body">${html}</div>`;

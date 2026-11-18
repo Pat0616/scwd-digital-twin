@@ -80,7 +80,7 @@ header.top .live.error { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 11
 .sec::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 
 /* ---------------------------------------------------------------- map views (segmented control) */
-.views { display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; padding: 3px; border-radius: 12px;
+.views { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 3px; padding: 3px; border-radius: 12px;
   background: rgba(6, 26, 61, .8); border: 1px solid var(--line); }
 .views button { background: none; border: none; border-radius: 9px; padding: 8px 2px; text-align: center; font: inherit;
   font-size: 11.5px; font-weight: 600; color: var(--muted); cursor: pointer; transition: background .15s, color .15s; }
@@ -267,9 +267,8 @@ header.top .live.error { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 11
 .st .eq span i { position: absolute; top: -2px; right: -2px; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid #fff; }
 .st.notwin .eq { opacity: .7; }
 #map.z-label .st:not(.notwin) .lab, #map.z-close .st .lab { display: block; }
-#map.z-close .st.station .eq, #map.v-equipment .st.station .eq { display: flex; }
-#map.v-equipment .st:not(.notwin) .lab { display: block; }
-#map.z-close .st.station .lab, #map.v-equipment .st.station .lab { top: calc(100% + 29px); }
+#map.z-close .st.station .eq { display: flex; }
+#map.z-close .st.station .lab { top: calc(100% + 29px); }
 .st .dot { display: none; width: 11px; height: 11px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(29,53,87,.4); }
 .st .dot.bad { width: 15px; height: 15px; }
 #map.z-province .st .site, #map.z-province .st .mini, #map.z-province .st .bubble, #map.z-province .st .eq,
@@ -301,7 +300,11 @@ header.top .live.error { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 11
 .ga.hide { display: none; }
 .glab { position: absolute; left: 16px; top: -3px; white-space: nowrap; font-size: 11.5px; font-weight: 700;
   color: var(--ink); text-shadow: 0 0 3px #fff, 0 0 3px #fff; pointer-events: none; display: none; }
-#map.v-pressure .glab { display: block; }
+/* Pressure view: zoomed out, only the points with a problem carry their value; from z-label, all of them */
+#map.v-pressure.z-label .glab, #map.v-pressure .gw.problem .glab { display: block; }
+/* labels the declutter pass found overlapping another (visibility, so they can still be measured next time) */
+#map .st.dc:not(.sel):not(.focus) .lab, #map .st.dc:not(.sel):not(.focus) .eq, #map .gw.dc:not(.sel):not(.focus) .glab { visibility: hidden; }
+.legend .lg-hint { margin-top: 6px; max-width: 220px; font-size: 11px; font-style: italic; opacity: .8; }
 /* markers: MapLibre places each one absolutely at its coordinate; .st { position: relative } must not override that */
 .maplibregl-marker.st, .maplibregl-marker.gw { position: absolute; }
 
