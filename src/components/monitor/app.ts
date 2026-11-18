@@ -752,10 +752,22 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     mapEl.classList.toggle("z-city", z >= 11 && z < 13);
     mapEl.classList.toggle("z-label", z >= 13.3);
     mapEl.classList.toggle("z-close", z >= 15.2);
+    mapEl.style.setProperty("--stw", `${Math.round(stationWidth(z))}px`);
     // zoomed out, the Pressure view keeps every pressure point's dial (the chlorine points only when they have a problem)
     for (const m of gaugeMarkers) m.el.classList.toggle("hide", z < 11 || !(m.problem || z >= 13.2 || (view === MON.views[1] && m.g.type === "pressure_logger")));
   }
   map.on("zoom", zoomClasses);
+  map.on("resize", zoomClasses);
+  // a live pumping station's picture width (px) at a zoom: a little bigger than the other sites from the city view,
+  // to about 22% of the map's width at street level (zoom 16, where opening a station flies to). One eased curve
+  // (on the log of the size, as zoom itself is): it starts gently, grows fastest mid-way and settles into the close-up
+  // size, with no corners, so zooming feels smooth
+  function stationWidth(z: number) {
+    const far = 46, close = Math.min(320, Math.max(160, 0.22 * mapEl.clientWidth));
+    const t = Math.min(1, Math.max(0, (z - 11) / (16 - 11)));
+    const ease = t * t * t * (t * (6 * t - 15) + 10);         // smootherstep: flat at both ends
+    return far * Math.pow(close / far, ease);
+  }
   // labels that would overlap one already placed are hidden (the worst state is placed first); the selected or focused
   // ones always stay. Their dial or picture stays, and hover / click still give the name.
   function declutter() {

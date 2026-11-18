@@ -232,7 +232,24 @@ header.top .live.error { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 11
 .st .site { display: block; width: 51px; height: 38px; filter: drop-shadow(0 1px 2px rgba(29,53,87,.35)); }
 .st .site svg { width: 100%; height: 100%; display: block; }
 .st.notwin .site { width: 37px; height: 28px; }
-#map.z-close .st:not(.reservoir):not(.spring) .site { width: 68px; height: 51px; }
+/* live pumping stations: sized with the zoom (--stw, set in zoomClasses), up to about a fifth of the map close up,
+   so they stand out as the network's main facilities; the label, parts row and bubble follow their edge */
+.st.station:not(.notwin) .site { width: var(--stw, 56px); height: calc(var(--stw, 56px) * .75); }
+#map.z-city .st.station:not(.notwin) .site { transform: none; }
+.st.station:not(.notwin) .mini { width: max(17px, calc(var(--stw, 56px) * .16)); height: max(17px, calc(var(--stw, 56px) * .16)); }
+.st.station:not(.notwin) .eq { gap: max(3px, calc(var(--stw, 56px) * .018)); }
+.st.station:not(.notwin) .eq span { width: max(20px, calc(var(--stw, 56px) * .15)); height: max(20px, calc(var(--stw, 56px) * .15)); }
+.st.station:not(.notwin) .eq span svg { width: 74%; height: 74%; }
+.st.station:not(.notwin) .eq span i { width: max(8px, calc(var(--stw, 56px) * .042)); height: max(8px, calc(var(--stw, 56px) * .042)); }
+/* details that appear with the zoom (labels, parts rows, values) fade in instead of popping */
+.st .lab, .st .eq, .glab { animation: md-fade .3s ease-out; }
+@keyframes md-fade { from { opacity: 0; transform: translateX(-50%) translateY(-3px); } to { opacity: 1; } }
+.glab { animation-name: md-fade-g; }
+@keyframes md-fade-g { from { opacity: 0; } to { opacity: 1; } }
+.st.station:not(.notwin) .lab .nm { font-size: max(12px, calc(var(--stw, 56px) * .068)); }
+.st.station:not(.notwin) .lab .hl { font-size: max(11.5px, calc(var(--stw, 56px) * .062)); }
+#map.z-close .st.station:not(.notwin) .lab, #map .st.focus.station:not(.notwin) .lab { top: calc(100% + 8px + max(20px, var(--stw, 56px) * .15)); }
+#map.z-close .st:not(.reservoir):not(.spring):not(.station) .site { width: 68px; height: 51px; }
 #map.z-close .st.notwin:not(.reservoir):not(.spring) .site { width: 50px; height: 37px; }
 #map.z-close .st.reservoir .site, #map.z-close .st.spring .site { width: 32px; height: 32px; }
 .st.reservoir .site, .st.spring .site { width: 24px; height: 24px; }
