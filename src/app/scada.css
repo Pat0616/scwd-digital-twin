@@ -302,6 +302,15 @@ body.resizing #map { pointer-events: none; }
 .pid .dose { stroke: var(--hp-pipe); stroke-width: 2.5; fill: none; }
 .pid .dose.on { stroke: var(--hp-pipe-on); }
 .pid .inj { fill: var(--hp-text); }
+/* motion on a live schematic: water running along the pipes, a ring turning around a running pump */
+.pid .flow { fill: none; stroke: rgba(255, 255, 255, .55); stroke-width: 2.4; stroke-linecap: round; stroke-dasharray: 2 16;
+  animation: pidflow 1s linear infinite; pointer-events: none; }
+.pid .flow.thin { stroke-width: 1.4; stroke-dasharray: 1.5 9; animation-duration: 1s; }
+@keyframes pidflow { to { stroke-dashoffset: -18; } }
+.pid .spin { fill: none; stroke: var(--hp-pipe-on); stroke-width: 2.5; stroke-dasharray: 9 7; opacity: .85;
+  transform-box: fill-box; transform-origin: center; animation: pidspin 2s linear infinite; pointer-events: none; }
+@keyframes pidspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pid .flow, .pid .spin { animation: none; } }
 .pid .arrow { fill: var(--hp-pipe); }
 .pid .arrow.on { fill: var(--hp-pipe-on); }
 .pid .bubble { fill: var(--hp-sunk); stroke: var(--hp-text); stroke-width: 1.5; transition: stroke .12s; }

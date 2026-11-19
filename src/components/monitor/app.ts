@@ -759,11 +759,11 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
   map.on("zoom", zoomClasses);
   map.on("resize", zoomClasses);
   // a live pumping station's picture width (px) at a zoom: a little bigger than the other sites from the city view,
-  // to about 22% of the map's width at street level (zoom 16, where opening a station flies to). One eased curve
+  // to about 13% of the map's width at street level (zoom 16, where opening a station flies to). One eased curve
   // (on the log of the size, as zoom itself is): it starts gently, grows fastest mid-way and settles into the close-up
   // size, with no corners, so zooming feels smooth
   function stationWidth(z: number) {
-    const far = 46, close = Math.min(320, Math.max(160, 0.22 * mapEl.clientWidth));
+    const far = 44, close = Math.min(190, Math.max(110, 0.13 * mapEl.clientWidth));
     const t = Math.min(1, Math.max(0, (z - 11) / (16 - 11)));
     const ease = t * t * t * (t * (6 * t - 15) + 10);         // smootherstep: flat at both ends
     return far * Math.pow(close / far, ease);
@@ -798,7 +798,44 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
 
   type GaugeMarker = { el: HTMLElement; wrap: HTMLElement; problem: boolean; g: Gauge; marker: Marker };
   const gaugeMarkers: GaugeMarker[] = [], stationMarkers: { el: HTMLElement; f: Facility; marker: Marker }[] = [];
+  /** A gauge's value label on the map: plain, and as shown while its barangay is in focus. */
+  function gaugeLabel(g: Gauge): { plain: string; focus: string } {
+    const st = g.state || "nodata";
+    const plain = g.type === "pressure_logger" ? (g.psi != null && st !== "nodata" ? `${g.psi} psi` : "no reading") : (g.chlorine != null ? `${g.chlorine} ppm` : "");
+    const focus = `${g.name} · ` + (g.type === "pressure_logger" ? (g.psi != null && st !== "nodata" ? `${g.psi} psi` : "not reporting") : (g.chlorine != null ? `${g.chlorine} ppm chlorine` : "not reporting"));
+    return { plain, focus };
+  }
+  // What decides how the markers are built (states, headlines, problem parts), apart from the gauges' values: while it
+  // stays the same, a live update only refreshes the values in place (updateMarkerValues), with no rebuild
+  const markerSig = () => JSON.stringify([stations.map((f) => [f.uid, f.state, f.headline, f.problems, (f.groups || []).map((g) => g.state)]),
+    gauges.map((g) => [g.uid, g.state])]);
+  let builtSig = "";
+  function updateMarkerValues() {
+    for (const m of gaugeMarkers) {
+      const lab = m.wrap.querySelector<HTMLElement>(".glab");
+      if (!lab) continue;
+      const gl = gaugeLabel(m.g);
+      if (gl.plain === lab.dataset.plain) continue;
+      lab.dataset.plain = gl.plain;
+      lab.dataset.focus = gl.focus;
+      lab.classList.remove("tick");
+      void lab.offsetWidth;                                    // restart the highlight
+      lab.classList.add("tick");
+      m.wrap.title = [m.g.name, m.g.headline || LBL[m.g.state || "nodata"] || "", m.g.action ? `→ ${m.g.action}` : ""].filter(Boolean).join("\n");
+    }
+    applyFocusClasses();                                       // writes each label's text (plain, or as in focus)
+  }
+  let rebuiltTimer: ReturnType<typeof setTimeout> | undefined;
   function addMarkers() {
+    builtSig = markerSig();
+    // a rebuild for a live update: the labels already on show do not fade in again (see #map.rebuilt in monitor.css);
+    // a value that changed pulses once instead
+    const prevLab = new Map(gaugeMarkers.map((m) => [m.g.uid, m.wrap.querySelector(".glab")?.textContent ?? ""]));
+    if (gaugeMarkers.length || stationMarkers.length) {
+      mapEl.classList.add("rebuilt");
+      clearTimeout(rebuiltTimer);
+      rebuiltTimer = setTimeout(() => mapEl.classList.remove("rebuilt"), 500);
+    }
     for (const m of [...gaugeMarkers, ...stationMarkers]) m.marker.remove();
     gaugeMarkers.length = 0;
     stationMarkers.length = 0;
@@ -834,9 +871,11 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
       el.appendChild(box);
       const lab = document.createElement("div");
       lab.className = "glab";
-      lab.textContent = g.type === "pressure_logger" ? (g.psi != null && st !== "nodata" ? `${g.psi} psi` : "no reading") : (g.chlorine != null ? `${g.chlorine} ppm` : "");
-      lab.dataset.focus = `${g.name} · ` + (g.type === "pressure_logger" ? (g.psi != null && st !== "nodata" ? `${g.psi} psi` : "not reporting") : (g.chlorine != null ? `${g.chlorine} ppm chlorine` : "not reporting"));
-      lab.dataset.plain = lab.textContent;
+      const gl = gaugeLabel(g);
+      lab.textContent = gl.plain;
+      lab.dataset.focus = gl.focus;
+      lab.dataset.plain = gl.plain;
+      if (prevLab.has(g.uid) && prevLab.get(g.uid) !== lab.textContent) lab.classList.add("tick");
       el.appendChild(lab);
       el.onclick = (ev) => { ev.stopPropagation(); openGauge(g.uid, false); };
       el.title = [g.name, g.headline || LBL[st] || "", g.action ? `→ ${g.action}` : ""].filter(Boolean).join("\n");
@@ -853,6 +892,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
 
   // ---------------------------------------------------------------- views
   const VIEW_KEYS = ["overview", "pressure", "equipment", "barangays", "health"];
+  const dialOf = new WeakMap<HTMLElement, string>();        // the dial each gauge marker shows now
   function setView(name: string) {
     view = name;
     const k = VIEW_KEYS[MON.views.indexOf(name)]!;
@@ -866,7 +906,8 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     for (const m of gaugeMarkers) {
       if (m.g.type === "pressure_logger") {
         const health = ({ live: "ok", late: "attention" } as Record<string, MonState>)[m.g.data ?? ""] ?? "nodata";
-        m.el.innerHTML = k === "health" ? gaugeSvg(health !== "nodata" ? m.g.psi : null, health, COL) : gaugeSvg(m.g.psi, m.g.state && m.g.state !== "notwin" ? m.g.state : "nodata", COL);
+        const svg = k === "health" ? gaugeSvg(health !== "nodata" ? m.g.psi : null, health, COL) : gaugeSvg(m.g.psi, m.g.state && m.g.state !== "notwin" ? m.g.state : "nodata", COL);
+        if (dialOf.get(m.el) !== svg) { m.el.innerHTML = svg; dialOf.set(m.el, svg); }   // the dial redrawn only when it changed
         continue;
       }
       const st = k === "health" ? (({ live: "ok", late: "attention", offline: "nodata" } as Record<string, string>)[m.g.data ?? ""] || "nodata") : (m.g.state || "nodata");
@@ -884,8 +925,14 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     // station faceplate and Status grid show every part (the view list itself comes from the QGIS export)
     const SHORT = ["Overview", "Pressure", "Equipment", "Barangays", "Data"];
     const shown = MON.views.map((v, i) => ({ v, i })).filter(({ i }) => VIEW_KEYS[i] !== "equipment");
-    $("#views").innerHTML = shown.map(({ v, i }) => `<button class="${v === view ? "on" : ""}" title="${esc(v.split(" ").slice(1).join(" "))}">${SHORT[i] || esc(v)}</button>`).join("");
-    root.querySelectorAll<HTMLElement>("#views button").forEach((b, n) => b.onclick = () => setView(shown[n]!.v));
+    // built once; a live update (which calls setView again) only moves the highlight, so a click never lands on a
+    // button that was just replaced
+    const box = $("#views");
+    if (box.children.length !== shown.length) {
+      box.innerHTML = shown.map(({ v, i }) => `<button title="${esc(v.split(" ").slice(1).join(" "))}">${SHORT[i] || esc(v)}</button>`).join("");
+      box.querySelectorAll<HTMLElement>("button").forEach((b, n) => b.onclick = () => setView(shown[n]!.v));
+    }
+    box.querySelectorAll<HTMLElement>("button").forEach((b, n) => b.classList.toggle("on", shown[n]!.v === view));
     legend(k);
     zoomClasses();
     requestAnimationFrame(declutter);
@@ -948,18 +995,32 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     toastTimers.push(setTimeout(() => { el.classList.add("out"); toastTimers.push(setTimeout(() => el.remove(), 350)); }, 9000));
   }
   const worse = (a: string | null | undefined, b: string | null | undefined) => (RANK[a ?? ""] ?? 9) < (RANK[b ?? ""] ?? 9);
+  // rings spreading out on the map from a place that just got a problem, so the eye finds it at once (about 7 s)
+  function ripple(lon: number, lat: number, st: string) {
+    if (!loaded) return;
+    const el = document.createElement("div");
+    el.className = `ripple ${st}`;
+    el.innerHTML = "<i></i><i></i><i></i>";
+    const m = new maplibregl.Marker({ element: el }).setLngLat([lon, lat]).addTo(map);
+    setTimeout(() => m.remove(), 7000);
+  }
   function announce(prevSt: Map<string, string | null>, prevGa: Map<string, string | null>) {
     for (const f of stations) {
       if (!f.twin_id || !prevSt.has(f.uid)) continue;
       const was = prevSt.get(f.uid);
-      if ((f.state === "down" || f.state === "attention") && worse(f.state, was)) toast(f.state, "New problem · station", f.name, f.headline, () => openStation(f.uid, true));
+      if ((f.state === "down" || f.state === "attention") && worse(f.state, was)) {
+        toast(f.state, "New problem · station", f.name, f.headline, () => openStation(f.uid, true));
+        ripple(f.lon, f.lat, f.state);
+      }
       else if (f.state === "ok" && (was === "down" || was === "attention")) toast("ok", "Back to normal · station", f.name, f.headline, () => openStation(f.uid, true));
     }
     for (const g of gauges) {
       if (!g.twin_id || !prevGa.has(g.uid)) continue;
       const was = prevGa.get(g.uid);
-      if ((g.state === "down" || g.state === "attention" || g.state === "nodata") && worse(g.state, was))
+      if ((g.state === "down" || g.state === "attention" || g.state === "nodata") && worse(g.state, was)) {
         toast(g.state, `${g.state === "nodata" ? "Not reporting" : "New problem"} · ${g.type === "pressure_logger" ? "pressure point" : "chlorine"}`, g.name, g.headline, () => openGauge(g.uid, true));
+        ripple(g.lon, g.lat, g.state);
+      }
       else if (g.state === "ok" && (was === "down" || was === "attention" || was === "nodata"))
         toast("ok", "Back to normal · gauge", g.name, g.headline, () => openGauge(g.uid, true));
     }
@@ -1004,6 +1065,7 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     renderAll();
     announce(prevSt, prevGa);
   }
+  let pipesSig = "", areasSig = "";
   function renderAll() {
     renderHeader();
     renderCards();
@@ -1011,9 +1073,13 @@ export function startMonitor(root: HTMLElement, gis: GisData, bg: Background | n
     renderCitySummary();
     renderPlaces();
     if (loaded) {
-      (map.getSource("pipes") as GeoJSONSource | undefined)?.setData(pipes);
-      (map.getSource("bgy") as GeoJSONSource | undefined)?.setData(areas);
-      addMarkers();
+      // the map's own layers are re-sent only when what they draw changed (re-sending makes the map re-tile them)
+      const ps = JSON.stringify((pipes.features as PipeFeature[]).map((f) => [f.properties.alarm, f.properties.band]));
+      if (ps !== pipesSig) { pipesSig = ps; (map.getSource("pipes") as GeoJSONSource | undefined)?.setData(pipes); }
+      const as = JSON.stringify(areas.features.map((f) => [f.properties.state, f.properties.headline]));
+      if (as !== areasSig) { areasSig = as; (map.getSource("bgy") as GeoJSONSource | undefined)?.setData(areas); }
+      if (markerSig() !== builtSig) addMarkers();
+      else updateMarkerValues();
       setView(view);
     }
     rerenderDetail();

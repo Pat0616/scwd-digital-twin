@@ -368,7 +368,12 @@ export function startScada(h: ScadaHost): Scada {
     const bulk = f.kind === "bulk";
     const tankR = pick(rs, "level_pct", "storage");
     const level = numOf(tankR);
-    const pipe = (d: string, on = flowing) => `<path class="pipe ${on ? "on" : ""}" d="${d}"/>`;
+    // water moving along a live pipe (a dash running down the line) and a turning ring on a running pump. The schematic
+    // is redrawn with every update, so each animation starts at the phase the clock gives it: it carries on, no jump
+    const phase = (s: number) => `animation-delay:-${((Date.now() % (s * 1000)) / 1000).toFixed(3)}s`;
+    const flow = (d: string, cls = "flow") => `<path class="${cls}" d="${d}" style="${phase(1)}"/>`;
+    const spin = (cx: number, cy: number, r: number) => `<circle class="spin" cx="${cx}" cy="${cy}" r="${r}" style="${phase(2)}"/>`;
+    const pipe = (d: string, on = flowing) => `<path class="pipe ${on ? "on" : ""}" d="${d}"/>` + (on ? flow(d) : "");
     let s = `<svg class="pid" viewBox="0 0 1000 390" text-anchor="middle" role="img" aria-label="Process schematic of ${esc(f.name)}">`;
     // ---- source: a well with its submersible pump, or a bulk supply point
     if (bulk) {
@@ -379,6 +384,7 @@ export function startScada(h: ScadaHost): Scada {
     } else {
       s += `<path class="casing" d="M68 112 V 330 M112 112 V 330"/><text class="lbl" x="90" y="352">WELL</text>` + flag(118, 300, G.get("source"));
       s += `<g class="hot" ${run ? `data-trend="${esc(keyOf(run))}"` : ""}><title>Submersible pump: ${running ? "running" : "stopped"}</title>` +
+        (running ? spin(90, 285, 25) : "") +
         `<circle class="pump ${running ? "on" : ""}" cx="90" cy="285" r="19"/><path class="pump-tri ${running ? "on" : ""}" d="M90 270 L104 292 H76 Z"/></g>` +
         `<text class="lbl" x="122" y="322" text-anchor="start">PUMP</text><text class="sub" x="122" y="337" text-anchor="start">${running ? "Running" : f.standby ? "Standby" : "Stopped"}</text>` +
         flag(118, 252, G.get("pumping"));
@@ -416,10 +422,11 @@ export function startScada(h: ScadaHost): Scada {
         (clTank && numOf(clTank) != null ? `<rect class="fill" x="347" y="${18 + 58 * (1 - Math.min(100, numOf(clTank)!) / 100)}" width="40" height="${58 * Math.min(100, numOf(clTank)!) / 100}"/>` : "") +
         `<g class="hot ${clTank?.alarm ? "abn" : ""}" ${clTank ? `data-trend="${esc(keyOf(clTank))}"` : ""}><text class="val sm" x="367" y="95">${clTank ? (clTank.offline ? "COMM" : `${numOf(clTank)}%`) : ""}</text></g>` +
         `<text class="lbl" x="367" y="10">Cl₂ TANK</text>` +
-        `<line class="dose ${dosing ? "on" : ""}" x1="389" y1="47" x2="430" y2="47"/>` +
-        `<g class="hot" ${dose ? `data-trend="${esc(keyOf(dose))}"` : ""}><title>Chlorine dosing pump</title><circle class="pump ${dosing ? "on" : ""}" cx="445" cy="47" r="13"/></g>` +
+        `<line class="dose ${dosing ? "on" : ""}" x1="389" y1="47" x2="430" y2="47"/>` + (dosing ? flow("M389 47 H 430", "flow thin") : "") +
+        `<g class="hot" ${dose ? `data-trend="${esc(keyOf(dose))}"` : ""}><title>Chlorine dosing pump</title>${dosing ? spin(445, 47, 18) : ""}<circle class="pump ${dosing ? "on" : ""}" cx="445" cy="47" r="13"/></g>` +
         `<text class="val sm" x="445" y="25">${dose ? (dose.offline ? "COMM" : `${numOf(dose)} L/h`) : ""}</text>` +
-        `<path class="dose ${dosing ? "on" : ""}" d="M445 60 V 150"/><circle class="inj" cx="445" cy="150" r="4"/>` + flag(468, 22, G.get("treatment"));
+        `<path class="dose ${dosing ? "on" : ""}" d="M445 60 V 150"/>` + (dosing ? flow("M445 60 V 150", "flow thin") : "") +
+        `<circle class="inj" cx="445" cy="150" r="4"/>` + flag(468, 22, G.get("treatment"));
     }
     // ---- the tank bypass: stations have one (the twin does not); drawn closed, and as the live path when the station
     // pumps around its tank (f.bypass, lib/monitor/status.ts stationBypass)
@@ -430,7 +437,7 @@ export function startScada(h: ScadaHost): Scada {
       `<line class="hatch" x1="0" y1="0" x2="0" y2="8"/></pattern></defs>`;
     s += `<g class="bypass-g ${by ? "on" : ""}"><title>Tank bypass line (not in the digital twin). ` +
       `Shown open when the storage tank is out of service, or its inlet is closed while water still leaves the station.</title>` +
-      `<path class="${by ? "pipe on" : "bypass"}" d="M500 150 V 22 H 764 V 250"/>` +
+      `<path class="${by ? "pipe on" : "bypass"}" d="M500 150 V 22 H 764 V 250"/>` + (by ? flow("M500 150 V 22 H 764 V 250") : "") +
       `<path class="valve ${by ? "on" : ""}" d="M623 12 L649 32 L649 12 L623 32 Z"/>` +
       `<text class="lbl" x="614" y="15" text-anchor="end">BYPASS</text>` +
       `<text class="sub ${by ? "abn-t" : ""}" x="614" y="36" text-anchor="end">${by ? "OPEN" : "closed"}</text>` +
@@ -561,9 +568,17 @@ export function startScada(h: ScadaHost): Scada {
       `<div class="seg ranges" role="group" aria-label="Time range">` +
       ([[1, "1 h"], [8, "8 h"], [24, "24 h"], [168, "7 d"]] as const).map(([hh, t]) => `<button class="${hours === hh ? "on" : ""}" data-hours="${hh}">${t}</button>`).join("") +
       `</div><button class="btn sm ghost" data-act="table">${fp.table ? "Chart" : "Table"}</button></header>`;
+    // the header (title, time ranges, table) is kept while it shows the same thing, so its buttons are not replaced
+    // under the pointer by a live redraw; only what is below it is
+    const hk = `${key}|${hours}|${fp.table}`;
+    const setBody = (html: string) => {
+      const h0 = box.querySelector(":scope > header.card-h");
+      if (box.dataset.hk === hk && h0) { while (h0.nextSibling) h0.nextSibling.remove(); h0.insertAdjacentHTML("afterend", html); }
+      else { box.innerHTML = head + html; box.dataset.hk = hk; }
+    };
     if (!d || !d.t.length || d.v.every((v) => v == null)) {
-      box.innerHTML = head + `<div class="tr-empty">${ICON.chart}<div><b>${d ? "No samples in this time range yet" : "The history could not be loaded"}</b>` +
-        `<span>${d ? "The server records every reading while the monitor is open (every few seconds, kept 7 days), so the trend fills in from now on." : "It will try again with the next update."}</span></div></div>`;
+      setBody(`<div class="tr-empty">${ICON.chart}<div><b>${d ? "No samples in this time range yet" : "The history could not be loaded"}</b>` +
+        `<span>${d ? "The server records every reading while the monitor is open (every few seconds, kept 7 days), so the trend fills in from now on." : "It will try again with the next update."}</span></div></div>`);
       return;
     }
     const nowMs = Date.now();
@@ -574,12 +589,12 @@ export function startScada(h: ScadaHost): Scada {
       .map(([k, v], i) => `<div><span>${k}</span><b>${v}${i < 4 && v !== "—" && v !== "COMM" ? `<small> ${esc(info.unit)}</small>` : ""}</b></div>`).join("") + `</div>`;
     if (fp.table) {
       const rows = d.t.map((t, i) => [t, d.v[i]] as const).filter(([t]) => t >= Date.now() - hours * 3.6e6).reverse().slice(0, 200);
-      box.innerHTML = head + stats + `<div class="tr-table"><table><thead><tr><th>Time</th><th>Value</th></tr></thead><tbody>` +
-        rows.map(([t, v]) => `<tr><td>${esc(clock(t))}</td><td>${v == null ? "offline" : `${v} ${esc(info.unit)}`}</td></tr>`).join("") + `</tbody></table></div>`;
+      setBody(stats + `<div class="tr-table"><table><thead><tr><th>Time</th><th>Value</th></tr></thead><tbody>` +
+        rows.map(([t, v]) => `<tr><td>${esc(clock(t))}</td><td>${v == null ? "offline" : `${v} ${esc(info.unit)}`}</td></tr>`).join("") + `</tbody></table></div>`);
       return;
     }
     const chart = trendSvg(d, hours, info.limits, info.unit);
-    box.innerHTML = head + stats + `<div class="tr-plot">${chart.svg}<div class="tip" hidden></div></div>`;
+    setBody(stats + `<div class="tr-plot">${chart.svg}<div class="tip" hidden></div></div>`);
     const svg = box.querySelector<SVGSVGElement>("svg.trend")!, tip = box.querySelector<HTMLElement>(".tip")!;
     const cross = svg.querySelector<SVGLineElement>(".cross")!, dot = svg.querySelector<SVGCircleElement>(".cross-dot")!;
     const W = 860, L = 46, R = 14, now = Date.now(), t0 = now - hours * 3.6e6;
@@ -623,7 +638,8 @@ export function startScada(h: ScadaHost): Scada {
   const card = (icon: string, title: string, body: string, cls = "", extra = "") =>
     `<section class="card ${cls}"><header class="card-h">${icon}<span>${title}</span>${extra}</header>${body}</section>`;
 
-  function renderFaceplate() {
+  /** Draws the faceplate; with `keepTrend` (the trend card already on show), that card is moved into the new one as it is. */
+  function renderFaceplate(keepTrend?: Element | null) {
     if (!fp) { face.hidden = true; return; }
     face.classList.toggle("expanded", fpExpanded);
     if (fp.kind === "station") {
@@ -667,6 +683,8 @@ export function startScada(h: ScadaHost): Scada {
         `<section class="card fp-trend"></section></div>`;
     }
     face.hidden = false;
+    const nb = face.querySelector(".fp-trend");
+    if (keepTrend && nb && keepTrend.childElementCount) { nb.replaceWith(keepTrend); return; }
     void renderTrend();
   }
   function openFaceplate(kind: "station" | "gauge", uid: string, trend = "") {
@@ -757,6 +775,7 @@ export function startScada(h: ScadaHost): Scada {
   // relative ages in the console ("12 min ago") move on
   const ageTimer = setInterval(() => { if (!collapsed && !drag) renderConsole(); }, 60_000);
   const trendTimer = setInterval(() => { if (fp && !document.hidden) { histCache.clear(); void renderTrend(); } }, 30_000);
+  let trendSoon: ReturnType<typeof setTimeout> | null = null;
 
   renderBar();
   renderConsole();
@@ -766,12 +785,17 @@ export function startScada(h: ScadaHost): Scada {
       renderBar();
       renderGrid();
       if (fp) {
-        // keep the trend chart as it is (no flicker): redraw only the schematic and the header
-        const trendBox = face.querySelector(".fp-trend");
-        const keep = trendBox?.innerHTML;
-        renderFaceplate();
-        const nb = face.querySelector(".fp-trend");
-        if (nb && keep) nb.innerHTML = keep;
+        // keep the trend card itself (no flicker, and its buttons stay put under the pointer): redraw only the
+        // schematic, the readings and the header
+        renderFaceplate(face.querySelector(".fp-trend"));
+        // then bring the trend up to date with the new reading (the server records it as it reads the twin), once
+        // shortly after each update, so the line moves live while it is watched
+        if (!trendSoon) trendSoon = setTimeout(() => {
+          trendSoon = null;
+          if (!fp || document.hidden) return;
+          for (const k of [...histCache.keys()]) if (k.startsWith(`${fp.trend}|`)) histCache.delete(k);
+          void renderTrend();
+        }, 600);
       }
     },
     setAlarms(list) {
@@ -796,6 +820,7 @@ export function startScada(h: ScadaHost): Scada {
       cancelAnimationFrame(raf);
       clearInterval(clockTimer);
       clearInterval(trendTimer);
+      if (trendSoon) clearTimeout(trendSoon);
     },
   };
 }
